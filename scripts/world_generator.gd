@@ -126,7 +126,6 @@ func _spawn_chunk(row: int, col: int) -> void:
 		_add_volcano(chunk, row, col)
 	if biome == "Lake country" or biome == "Steppe" or biome == "Forest":
 		_add_water(chunk, biome)
-	_add_clouds(chunk, row, col)
 
 
 func _height_for_biome(x: float, world_z: float, biome_index: int) -> float:
@@ -429,30 +428,6 @@ func _add_volcano(parent: Node3D, row: int, col: int) -> void:
 	crater.mesh = crater_mesh
 	crater.position = Vector3(x, ground + 52.7, local_z)
 	parent.add_child(crater)
-
-
-func _add_clouds(parent: Node3D, row: int, col: int) -> void:
-	var rng := RandomNumberGenerator.new()
-	rng.seed = abs(world_seed + row * 4421 + col * 149) + 5
-	# Unshaded: sun never hits cloud bottoms, so lit shading renders them
-	# near-black (see the dark slabs). Flat bright reads as stylized cloud.
-	var material := _solid_material(Color("eef4f6", 0.9))
-	material.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
-	for cloud in range(3):
-		var cloud_root := Node3D.new()
-		cloud_root.position = Vector3(rng.randf_range(-WORLD_WIDTH * 0.45, WORLD_WIDTH * 0.45), rng.randf_range(67.0, 94.0), -rng.randf_range(16.0, CHUNK_LENGTH - 16.0))
-		parent.add_child(cloud_root)
-		var puffs: int = rng.randi_range(3, 5)
-		for puff in range(puffs):
-			var block := MeshInstance3D.new()
-			var box := BoxMesh.new()
-			box.size = Vector3(rng.randf_range(5.0, 11.0), rng.randf_range(2.5, 4.6), rng.randf_range(4.0, 9.0))
-			box.material = material
-			block.mesh = box
-			# Rectangular shadows from puff-boxes read as glitches; skip them.
-			block.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
-			block.position = Vector3(float(puff - puffs / 2) * 4.0, rng.randf_range(-0.8, 1.2), rng.randf_range(-1.5, 1.5))
-			cloud_root.add_child(block)
 
 
 func _solid_material(color: Color) -> StandardMaterial3D:

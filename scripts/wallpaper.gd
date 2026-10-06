@@ -7,11 +7,15 @@ const InputManager = preload("res://scripts/input_manager.gd")
 const AudioReactor = preload("res://scripts/audio_reactor.gd")
 const ExternalEventServer = preload("res://scripts/external_event_server.gd")
 const FxManager = preload("res://scripts/fx_manager.gd")
+const EnvironmentDirector = preload("res://scripts/environment_director.gd")
 
 var dragon: Node3D
 var world: Node3D
 var chase_camera: Camera3D
 var sun_light: DirectionalLight3D
+var fill_light: DirectionalLight3D
+var sky_material_ref: ProceduralSkyMaterial
+var environment_ref: Environment
 var hud_panel: PanelContainer
 var biome_label: Label
 var status_label: Label
@@ -23,6 +27,7 @@ var input_manager: AerieInputManager
 var audio_reactor: AerieAudioReactor
 var event_server: AerieExternalEventServer
 var fx_manager: AerieFxManager
+var environment_director: AerieEnvironmentDirector
 
 
 func _ready() -> void:
@@ -95,6 +100,10 @@ func _setup_interactivity() -> void:
 	if OS.has_environment("AERIE_EVENT_PORT"):
 		tcp_port = int(OS.get_environment("AERIE_EVENT_PORT"))
 	event_server.setup(event_bus, tcp_port)
+	environment_director = EnvironmentDirector.new()
+	environment_director.name = "EnvironmentDirector"
+	add_child(environment_director)
+	environment_director.setup(environment_ref, sky_material_ref, sun_light, fill_light, chase_camera, dragon, fx_manager)
 
 
 func _add_key_action(action_name: String, keycodes: Array[int]) -> void:
@@ -122,6 +131,7 @@ func _setup_environment() -> void:
 	sky_material.ground_energy_multiplier = 0.6
 	sky_material.sun_angle_max = 18.0
 	sky.sky_material = sky_material
+	sky_material_ref = sky_material
 	environment.sky = sky
 	environment.ambient_light_source = Environment.AMBIENT_SOURCE_SKY
 	environment.ambient_light_energy = 0.38
@@ -134,6 +144,7 @@ func _setup_environment() -> void:
 	environment.fog_light_color = Color("a9c4de")
 	environment.fog_density = 0.00045
 	environment.fog_sky_affect = 0.15
+	environment_ref = environment
 	world_environment.environment = environment
 	add_child(world_environment)
 	var sun := DirectionalLight3D.new()
@@ -154,6 +165,7 @@ func _setup_environment() -> void:
 	fill.light_energy = 0.3
 	fill.shadow_enabled = false
 	add_child(fill)
+	fill_light = fill
 
 
 func _setup_camera() -> void:
@@ -214,6 +226,8 @@ func _update_hud() -> void:
 	var extra := ""
 	if audio_reactor != null:
 		extra = "   •   voice %.2f" % audio_reactor.current_level
+	if environment_director != null:
+		extra += "   •   %s %s · %s" % [environment_director.time_string(), environment_director.period_name(), environment_director.weather]
 	if paused:
 		status_label.text = "PAUSED   •   SPACE resume   •   F1 hide" + extra
 	elif window.mode == Window.MODE_FULLSCREEN:
