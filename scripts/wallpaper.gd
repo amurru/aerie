@@ -20,6 +20,7 @@ var environment_ref: Environment
 var hud_panel: PanelContainer
 var biome_label: Label
 var status_label: Label
+var dive_overlay: ColorRect
 var hud_visible: bool = true
 var paused: bool = false
 var hud_timer: float = 0.0
@@ -59,11 +60,15 @@ func _process(delta: float) -> void:
 	world.update_follow(dragon.global_position)
 	_shout_eruption_check()
 	_update_ambience()
+	_collide_terrain()
+	_update_dive()
 	# Chase behind the heading so free flight and U-turns read correctly.
 	# Slight lateral lag keeps steering parallax visible.
 	var facing := Vector3(-sin(dragon.rotation.y), 0.0, -cos(dragon.rotation.y))
 	var target: Vector3 = dragon.global_position - facing * 19.0 + Vector3(0.0, 7.6, 0.0)
 	chase_camera.global_position = chase_camera.global_position.lerp(target, 1.0 - exp(-2.7 * delta))
+	var cam_ground: float = world.get_ground_height(chase_camera.global_position.x, chase_camera.global_position.z)
+	chase_camera.global_position.y = maxf(chase_camera.global_position.y, cam_ground + 1.0)
 	chase_camera.look_at(dragon.global_position + facing * 4.0 + Vector3(0.0, 0.1, 0.0), Vector3.UP)
 	hud_timer -= delta
 	if hud_timer <= 0.0:
@@ -77,6 +82,22 @@ func compass_point() -> String:
 	if idx < 0:
 		idx += 8
 	return points[idx]
+
+
+func _collide_terrain() -> void:
+	# No passing through mountains: hard floor on the sampled terrain height.
+	var ground: float = world.get_ground_height(dragon.global_position.x, dragon.global_position.z)
+	if dragon.global_position.y < ground + 2.0:
+		dragon.global_position.y = ground + 2.0
+
+
+func _update_dive() -> void:
+	var submerged: bool = world.is_submerged(dragon.global_position)
+	world.ensure_underwater(dragon.global_position)
+	if dive_overlay != null:
+		dive_overlay.visible = submerged
+	if sfx_manager != null and sfx_manager.has_method("set_underwater"):
+		sfx_manager.set_underwater(submerged)
 
 
 func _near_volcano_hint() -> String:
@@ -222,6 +243,18 @@ func _setup_hud() -> void:
 	layer.name = "Wallpaper_HUD"
 	layer.layer = 5
 	add_child(layer)
+	# Underwater tint sits under the HUD layer so text stays readable.
+	var dive_layer := CanvasLayer.new()
+	dive_layer.name = "DiveTint"
+	dive_layer.layer = 4
+	add_child(dive_layer)
+	dive_overlay = ColorRect.new()
+	dive_overlay.name = "UnderwaterTint"
+	dive_overlay.color = Color(0.05, 0.28, 0.5, 0.42)
+	dive_overlay.set_anchors_preset(Control.PRESET_FULL_RECT)
+	dive_overlay.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	dive_overlay.visible = false
+	dive_layer.add_child(dive_overlay)
 	hud_panel = PanelContainer.new()
 	hud_panel.position = Vector2(24.0, 24.0)
 	hud_panel.custom_minimum_size = Vector2(318.0, 104.0)

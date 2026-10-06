@@ -245,7 +245,7 @@ func _scatter_cloud(root: Node3D) -> void:
 	var dist: float = randf_range(DECK_MIN_R, DECK_MAX_R)
 	root.position = Vector3(
 		dragon.global_position.x + cos(ang) * dist,
-		randf_range(70.0, 115.0),
+		randf_range(78.0, 125.0),
 		dragon.global_position.z + sin(ang) * dist
 	)
 

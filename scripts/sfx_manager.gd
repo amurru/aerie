@@ -25,6 +25,9 @@ var _boom: AudioStreamPlayer
 var _wind_db := -26.0
 var _rain_db := -60.0
 var _fire_db := -60.0
+var _lowpass: AudioEffectFilter
+var _muffle := 0.0
+var _muffle_target := 0.0
 
 
 func setup(p_event_bus: AerieEventBus) -> void:
@@ -36,8 +39,15 @@ func setup(p_event_bus: AerieEventBus) -> void:
 	_thunder.append(_shot(PATH_THUNDER_A))
 	_thunder.append(_shot(PATH_THUNDER_B))
 	_boom = _shot(PATH_BOOM)
+	_lowpass = AudioEffectFilter.new()
+	_lowpass.cutoff_hz = 18000.0
+	AudioServer.add_bus_effect(0, _lowpass)
 	if event_bus != null and not event_bus.thunder_clap.is_connected(_on_thunder):
 		event_bus.thunder_clap.connect(_on_thunder)
+
+
+func set_underwater(submerged: bool) -> void:
+	_muffle_target = 1.0 if submerged else 0.0
 
 
 func set_ambience(weather: String, volcano: float) -> void:
@@ -68,6 +78,9 @@ func _process(delta: float) -> void:
 	_wind.volume_db = lerpf(_wind.volume_db, _wind_db, k)
 	_rain.volume_db = lerpf(_rain.volume_db, _rain_db, k)
 	_fire.volume_db = lerpf(_fire.volume_db, _fire_db, k)
+	_muffle = lerpf(_muffle, _muffle_target, 1.0 - exp(-delta * 3.0))
+	if _lowpass != null:
+		_lowpass.cutoff_hz = lerpf(18000.0, 450.0, _muffle)
 
 
 func _on_thunder(_intensity: float) -> void:

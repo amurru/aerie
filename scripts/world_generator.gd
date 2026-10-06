@@ -18,6 +18,11 @@ var _biome_cache: Dictionary = {}
 var _volcanoes: Array[Dictionary] = []
 var _volc_time: float = 0.0
 
+var _sea_pool: Array[Node3D] = []
+var _sea_bubbles: CPUParticles3D
+var _sea_center := Vector3(0.0, 0.0, 0.0)
+var _sea_built := false
+
 
 func _process(_delta: float) -> void:
 	# Magma glow flicker for active volcanoes; eruption state machine.
@@ -157,6 +162,114 @@ func get_ground_height(x: float, world_z: float) -> float:
 	return _height_open(x, world_z)
 
 
+const WATER_LEVEL := 16.0
+
+
+func water_at(x_abs: float, world_z: float) -> bool:
+	match BIOMES[_biome_index(_cell_at(x_abs, world_z))]:
+		"Lake country", "Steppe", "Forest":
+			return true
+	return false
+
+
+func is_submerged(dragon_pos: Vector3) -> bool:
+	return dragon_pos.y < WATER_LEVEL - 0.4 and water_at(dragon_pos.x, dragon_pos.z)
+
+
+func ensure_underwater(center: Vector3) -> void:
+	# Detail only exists while approached: a small recycled pool of weed and
+	# rock plus a bubble emitter, parked near the dragon while submerged.
+	if not _sea_built:
+		_build_sea_pool()
+	var active: bool = is_submerged(center)
+	if active and _sea_center.distance_to(center) > 15.0:
+		_sea_center = center
+		_scatter_sea_pool()
+	for node in _sea_pool:
+		if node.get_meta("skip", false):
+			node.visible = false
+		else:
+			node.visible = active
+	if _sea_bubbles != null:
+		_sea_bubbles.emitting = active
+		if active:
+			_sea_bubbles.global_position = center + Vector3(0.0, 1.0, -2.0)
+
+
+func _build_sea_pool() -> void:
+	_sea_built = true
+	var rng := RandomNumberGenerator.new()
+	rng.seed = 4242
+	var weed_mat := _solid_material(Color("2e7a3d"))
+	var rock_mat := _solid_material(Color("5a6068"))
+	for i in range(20):
+		var tuft := MeshInstance3D.new()
+		tuft.name = "Seaweed"
+		var blade := CylinderMesh.new()
+		blade.top_radius = 0.12
+		blade.bottom_radius = 0.35
+		blade.height = rng.randf_range(2.5, 5.0)
+		blade.radial_segments = 5
+		blade.material = weed_mat
+		tuft.mesh = blade
+		tuft.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+		add_child(tuft)
+		tuft.visible = false
+		_sea_pool.append(tuft)
+	for i in range(10):
+		var rock := MeshInstance3D.new()
+		rock.name = "UnderwaterRock"
+		var stone := SphereMesh.new()
+		stone.radius = rng.randf_range(0.6, 1.6)
+		stone.height = stone.radius * 1.4
+		stone.material = rock_mat
+		rock.mesh = stone
+		rock.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+		add_child(rock)
+		rock.visible = false
+		_sea_pool.append(rock)
+	_sea_bubbles = CPUParticles3D.new()
+	_sea_bubbles.name = "DiveBubbles"
+	_sea_bubbles.amount = 40
+	_sea_bubbles.lifetime = 2.0
+	_sea_bubbles.local_coords = false
+	_sea_bubbles.emission_shape = CPUParticles3D.EMISSION_SHAPE_SPHERE
+	_sea_bubbles.emission_sphere_radius = 1.5
+	_sea_bubbles.direction = Vector3(0.0, 1.0, 0.0)
+	_sea_bubbles.spread = 12.0
+	_sea_bubbles.initial_velocity_min = 2.0
+	_sea_bubbles.initial_velocity_max = 4.5
+	_sea_bubbles.gravity = Vector3(0.0, 1.5, 0.0)
+	var bead := SphereMesh.new()
+	bead.radius = 0.12
+	bead.height = 0.24
+	var bead_mat := StandardMaterial3D.new()
+	bead_mat.albedo_color = Color("cfe8f2")
+	bead_mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	bead.material = bead_mat
+	_sea_bubbles.mesh = bead
+	_sea_bubbles.emitting = false
+	add_child(_sea_bubbles)
+
+
+func _scatter_sea_pool() -> void:
+	var rng := RandomNumberGenerator.new()
+	rng.seed = absi(int(_sea_center.x) * 13 + int(_sea_center.z) * 7) + 99
+	for node in _sea_pool:
+		var ox: float = rng.randf_range(-45.0, 45.0)
+		var oz: float = rng.randf_range(-45.0, 45.0)
+		var gx: float = _sea_center.x + ox
+		var gz: float = _sea_center.z + oz
+		var ground: float = _height_open(gx, gz)
+		if ground > WATER_LEVEL - 0.5:
+			node.visible = false
+			node.set_meta("skip", true)
+			continue
+		node.set_meta("skip", false)
+		node.position = Vector3(gx, ground + 1.2, gz)
+		node.rotation.y = rng.randf_range(0.0, TAU)
+
+
 func _cell_at(x_abs: float, world_z: float) -> Vector2i:
 	var col: int = int(floor((x_abs + WORLD_WIDTH * 0.5) / WORLD_WIDTH))
 	var row: int = int(floor(-world_z / CHUNK_LENGTH))
@@ -212,21 +325,27 @@ func _height_for_biome(x: float, world_z: float, biome_index: int) -> float:
 	var ridge: float = 1.0 - abs(ridge_noise.get_noise_2d(x, world_z))
 	match BIOMES[biome_index]:
 		"Mountains":
-			return 14.0 + pow(ridge, 1.45) * 36.0 + broad * 7.0 + detail * 4.0
+			return 22.0 + pow(ridge, 1.45) * 36.0 + broad * 7.0 + detail * 4.0
 		"Glacier":
-			return 20.0 + pow(ridge, 1.7) * 30.0 + broad * 7.0 + detail * 2.0
+			return 28.0 + pow(ridge, 1.7) * 30.0 + broad * 7.0 + detail * 2.0
 		"Volcano":
-			return 12.0 + broad * 11.0 + detail * 6.0 + ridge * 9.0
+			return 20.0 + broad * 11.0 + detail * 6.0 + ridge * 9.0
 		"Forest":
-			return 13.0 + broad * 14.0 + detail * 3.0
+			return 21.0 + broad * 14.0 + detail * 3.0 - _basin(broad, -0.25, 10.0)
 		"Desert":
-			return 7.0 + abs(broad) * 8.5 + detail * 3.0 + sin(world_z * 0.024 + x * 0.012) * 3.5
+			return 15.0 + abs(broad) * 8.5 + detail * 3.0 + sin(world_z * 0.024 + x * 0.012) * 3.5
 		"Lake country":
-			return 9.0 + broad * 5.0 + detail * 1.3
+			return 17.0 + broad * 5.0 + detail * 1.3 - _basin(broad, -0.1, 14.0)
 		"Highlands":
-			return 16.0 + abs(broad) * 18.0 + ridge * 8.0 + detail * 4.0
+			return 24.0 + abs(broad) * 18.0 + ridge * 8.0 + detail * 4.0
 		_:
-			return 11.0 + broad * 8.0 + detail * 2.5 + sin(x * 0.018) * 2.0
+			return 19.0 + broad * 8.0 + detail * 2.5 + sin(x * 0.018) * 2.0 - _basin(broad, -0.2, 8.0)
+
+
+func _basin(broad: float, edge: float, depth: float) -> float:
+	# Carved lake basins where the broad noise dips: full depth below
+	# (edge - 0.6), fading to none at edge.
+	return (1.0 - smoothstep(edge - 0.6, edge, broad)) * depth
 
 
 func _height_open(x_abs: float, world_z: float) -> float:
@@ -293,11 +412,11 @@ func _ground_color(biome_index: int, height: float, detail: float) -> Color:
 	match BIOMES[biome_index]:
 		"Mountains":
 			low = Color("4f8a35")
-			snow_line = 42.0
+			snow_line = 50.0
 			high = Color("f4f6f3") if height > snow_line else Color("7d9078")
 		"Glacier":
 			low = Color("bcdcec")
-			high = Color("ffffff") if height > 32.0 else Color("aed6e8")
+			high = Color("ffffff") if height > 40.0 else Color("aed6e8")
 		"Volcano":
 			low = Color("4a3428")
 			high = Color("8a5f3d")
@@ -312,12 +431,12 @@ func _ground_color(biome_index: int, height: float, detail: float) -> Color:
 			high = Color("6fbf5a")
 		"Highlands":
 			low = Color("4f8a2f")
-			high = Color("e8ece6") if height > 44.0 else Color("84ac54")
+			high = Color("e8ece6") if height > 52.0 else Color("84ac54")
 		_:
 			# Steppe: vivid green meadow.
 			low = Color("46a02e")
 			high = Color("8fd14f")
-	var blend: float = clampf((height - 20.0) / 60.0, 0.0, 0.85)
+	var blend: float = clampf((height - 28.0) / 60.0, 0.0, 0.85)
 	var color: Color = low.lerp(high, blend)
 	return color * (1.0 + detail * 0.045)
 
@@ -374,7 +493,7 @@ func _add_water(parent: Node3D, biome: String) -> void:
 	var plane := PlaneMesh.new()
 	plane.size = Vector2(WORLD_WIDTH - 10.0, CHUNK_LENGTH)
 	water.mesh = plane
-	water.position = Vector3(0.0, 11.0, -CHUNK_LENGTH * 0.5)
+	water.position = Vector3(0.0, 16.0, -CHUNK_LENGTH * 0.5)
 	var water_material := StandardMaterial3D.new()
 	# Opaque: transparency blended the pale terrain underneath into cyan.
 	water_material.albedo_color = Color("1470d4") if biome == "Lake country" else Color("1c74c4")
