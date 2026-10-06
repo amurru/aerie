@@ -15,22 +15,66 @@ var broad_noise: FastNoiseLite
 var detail_noise: FastNoiseLite
 var ridge_noise: FastNoiseLite
 var _biome_cache: Dictionary = {}
-var _volc_lights: Array[OmniLight3D] = []
-var _volc_phase: Array[float] = []
+var _volcanoes: Array[Dictionary] = []
 var _volc_time: float = 0.0
 
 
 func _process(_delta: float) -> void:
-	# Magma glow flicker for active volcanoes.
-	if _volc_lights.is_empty():
+	# Magma glow flicker for active volcanoes; eruption state machine.
+	if _volcanoes.is_empty():
 		return
 	_volc_time += _delta
-	for i in range(_volc_lights.size()):
-		var lamp: OmniLight3D = _volc_lights[i]
-		if not is_instance_valid(lamp):
+	for v in _volcanoes:
+		var glow: OmniLight3D = v.get("glow")
+		if not is_instance_valid(glow):
 			continue
-		var p: float = _volc_phase[i]
-		lamp.light_energy = 2.6 + sin(_volc_time * 7.0 + p) * 0.5 + sin(_volc_time * 13.0 + p * 2.0) * 0.3
+		var p: float = v.get("phase", 0.0)
+		var flicker: float = sin(_volc_time * 7.0 + p) * 0.5 + sin(_volc_time * 13.0 + p * 2.0) * 0.3
+		var erupting: float = float(v.get("erupting", 0.0))
+		if erupting > 0.0:
+			erupting = maxf(0.0, erupting - _delta)
+			v["erupting"] = erupting
+		var cooldown: float = float(v.get("cooldown", 0.0))
+		if cooldown > 0.0:
+			v["cooldown"] = maxf(0.0, cooldown - _delta)
+		var active: bool = bool(v.get("active", false))
+		if erupting > 0.0:
+			glow.light_energy = 5.5 + flicker
+		elif active:
+			glow.light_energy = 2.6 + flicker
+		else:
+			glow.light_energy = 0.0
+		var fountain: CPUParticles3D = v.get("fountain")
+		if is_instance_valid(fountain):
+			fountain.emitting = erupting > 0.0
+		for flow in v.get("flows", []):
+			if is_instance_valid(flow):
+				(flow as Node3D).visible = erupting > 0.0
+
+
+func nearest_volcano(dragon_pos: Vector3, max_dist: float) -> int:
+	var best := -1
+	var best_d := max_dist
+	for i in range(_volcanoes.size()):
+		var anchor: Vector3 = _volcanoes[i].get("anchor", Vector3.ZERO)
+		var d: float = dragon_pos.distance_to(anchor)
+		if d < best_d:
+			best_d = d
+			best = i
+	return best
+
+
+func try_erupt(index: int, duration: float) -> bool:
+	if index < 0 or index >= _volcanoes.size():
+		return false
+	var v: Dictionary = _volcanoes[index]
+	if not is_instance_valid(v.get("glow")):
+		return false
+	if float(v.get("erupting", 0.0)) > 0.0 or float(v.get("cooldown", 0.0)) > 0.0:
+		return false
+	v["erupting"] = duration
+	v["cooldown"] = duration + 30.0
+	return true
 
 
 func _ready() -> void:
@@ -75,11 +119,10 @@ func update_follow(dragon_pos: Vector3) -> void:
 			var old_chunk: Node3D = chunks[key]
 			chunks.erase(key)
 			old_chunk.queue_free()
-	# Drop flicker refs whose volcano chunk was recycled.
-	for i in range(_volc_lights.size() - 1, -1, -1):
-		if not is_instance_valid(_volc_lights[i]):
-			_volc_lights.remove_at(i)
-			_volc_phase.remove_at(i)
+	# Drop volcano records whose chunk was recycled.
+	for i in range(_volcanoes.size() - 1, -1, -1):
+		if not is_instance_valid(_volcanoes[i].get("glow")):
+			_volcanoes.remove_at(i)
 
 
 func regenerate_at(dragon_pos: Vector3) -> void:
@@ -87,8 +130,7 @@ func regenerate_at(dragon_pos: Vector3) -> void:
 		old_chunk.queue_free()
 	chunks.clear()
 	_biome_cache.clear()
-	_volc_lights.clear()
-	_volc_phase.clear()
+	_volcanoes.clear()
 	world_seed = randi_range(1, 2000000000)
 	_configure_noise()
 	update_follow(dragon_pos)
@@ -456,19 +498,95 @@ func _add_volcano(parent: Node3D, row: int, col: int) -> void:
 	crater.mesh = crater_mesh
 	crater.position = Vector3(x, ground + 52.7, local_z)
 	parent.add_child(crater)
-	if not active:
-		return
+	# Every volcano gets an eruption kit so shouting can wake dormant ones;
+	# only active cones get idle embers and smoke.
 	var glow := OmniLight3D.new()
 	glow.name = "MagmaGlow"
 	glow.light_color = Color("ff5a1a")
-	glow.light_energy = 2.6
+	glow.light_energy = 2.6 if active else 0.0
 	glow.omni_range = 70.0
 	glow.position = Vector3(x, ground + 56.0, local_z)
 	parent.add_child(glow)
-	_volc_lights.append(glow)
-	_volc_phase.append(randf() * TAU)
-	_add_embers(parent, x, ground + 53.0, local_z)
-	_add_smoke(parent, x, ground + 56.0, local_z)
+	var record := {
+		"anchor": parent.position + Vector3(x, ground + 53.0, local_z),
+		"glow": glow,
+		"fountain": null,
+		"flows": [],
+		"active": active,
+		"erupting": 0.0,
+		"cooldown": 0.0,
+		"phase": randf() * TAU,
+	}
+	_volcanoes.append(record)
+	var flows: Array = record["flows"]
+	_add_flows(parent, flows, x, ground, local_z)
+	record["fountain"] = _add_fountain(parent, x, ground + 53.0, local_z)
+	if active:
+		_add_embers(parent, x, ground + 53.0, local_z)
+		_add_smoke(parent, x, ground + 56.0, local_z)
+
+
+func _lava_material() -> StandardMaterial3D:
+	var mat := StandardMaterial3D.new()
+	mat.albedo_color = Color("ff3a0a")
+	mat.emission_enabled = true
+	mat.emission = Color("ff4a0d")
+	mat.emission_energy_multiplier = 2.5
+	return mat
+
+
+func _add_flows(parent: Node3D, flows: Array, x: float, ground: float, local_z: float) -> void:
+	# Magma spill: emissive strips draped down the cone, hidden until eruption.
+	var mat := _lava_material()
+	for a in range(4):
+		var ang: float = float(a) * PI * 0.5 + 0.4
+		var dir := Vector3(cos(ang), 0.0, sin(ang))
+		var top: Vector3 = Vector3(x, ground + 52.0, local_z) + dir * 6.0
+		var bottom: Vector3 = Vector3(x, ground + 2.0, local_z) + dir * 33.0
+		var strip := MeshInstance3D.new()
+		strip.name = "MagmaFlow"
+		var box := BoxMesh.new()
+		var length: float = top.distance_to(bottom)
+		box.size = Vector3(1.4, 0.5, length)
+		box.material = mat
+		strip.mesh = box
+		strip.position = (top + bottom) * 0.5
+		parent.add_child(strip)
+		strip.look_at(strip.global_position + (bottom - top).normalized(), Vector3.UP)
+		strip.visible = false
+		strip.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+		flows.append(strip)
+
+
+func _add_fountain(parent: Node3D, x: float, y: float, local_z: float) -> CPUParticles3D:
+	# Red lava fountain, idle until eruption.
+	var fountain := CPUParticles3D.new()
+	fountain.name = "LavaFountain"
+	fountain.amount = 140
+	fountain.lifetime = 2.2
+	fountain.lifetime_randomness = 0.35
+	fountain.local_coords = false
+	fountain.emission_shape = CPUParticles3D.EMISSION_SHAPE_SPHERE
+	fountain.emission_sphere_radius = 4.0
+	fountain.direction = Vector3(0.0, 1.0, 0.0)
+	fountain.spread = 12.0
+	fountain.initial_velocity_min = 16.0
+	fountain.initial_velocity_max = 24.0
+	fountain.gravity = Vector3(0.0, -14.0, 0.0)
+	fountain.damping_min = 0.2
+	fountain.damping_max = 0.8
+	var drop := SphereMesh.new()
+	drop.radius = 0.28
+	drop.height = 0.56
+	var mat := StandardMaterial3D.new()
+	mat.albedo_color = Color("ff2a0d")
+	mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	drop.material = mat
+	fountain.mesh = drop
+	fountain.position = Vector3(x, y, local_z)
+	fountain.emitting = false
+	parent.add_child(fountain)
+	return fountain
 
 
 func _add_embers(parent: Node3D, x: float, y: float, local_z: float) -> void:

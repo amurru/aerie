@@ -53,6 +53,7 @@ func _ready() -> void:
 
 func _process(delta: float) -> void:
 	world.update_follow(dragon.global_position)
+	_shout_eruption_check()
 	# Chase behind the heading so free flight and U-turns read correctly.
 	# Slight lateral lag keeps steering parallax visible.
 	var facing := Vector3(-sin(dragon.rotation.y), 0.0, -cos(dragon.rotation.y))
@@ -71,6 +72,22 @@ func compass_point() -> String:
 	if idx < 0:
 		idx += 8
 	return points[idx]
+
+
+func _near_volcano_hint() -> String:
+	if world.nearest_volcano(dragon.global_position, 170.0) >= 0:
+		return "   •   volcano near - SHOUT to erupt"
+	return ""
+
+
+func _shout_eruption_check() -> void:
+	if audio_reactor == null or not audio_reactor.enabled:
+		return
+	if audio_reactor.current_level < 0.55:
+		return
+	var index: int = world.nearest_volcano(dragon.global_position, 150.0)
+	if index >= 0 and world.try_erupt(index, 12.0):
+		event_bus.publish_beat(1.0)
 
 
 func _setup_input() -> void:
@@ -228,6 +245,7 @@ func _update_hud() -> void:
 		extra = "   •   voice %.2f" % audio_reactor.current_level
 	if environment_director != null:
 		extra += "   •   %s %s · %s" % [environment_director.time_string(), environment_director.period_name(), environment_director.weather]
+	extra += _near_volcano_hint()
 	if paused:
 		status_label.text = "PAUSED   •   SPACE resume   •   F1 hide" + extra
 	elif window.mode == Window.MODE_FULLSCREEN:

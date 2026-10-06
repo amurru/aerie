@@ -22,6 +22,10 @@ func setup(p_event_bus: AerieEventBus) -> void:
 	event_bus = p_event_bus
 	_ensure_bus()
 	_ensure_mic()
+	# Hear-nothing monitor: the player must keep playing for capture and
+	# spectrum to receive audio, but the bus itself stays silent. Bus
+	# mute/volume apply when mixing toward Master, after bus effects run.
+	AudioServer.set_bus_mute(bus_index, true)
 
 
 func _ensure_bus() -> void:
