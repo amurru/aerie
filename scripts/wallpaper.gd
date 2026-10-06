@@ -93,6 +93,7 @@ func _collide_terrain() -> void:
 
 func _update_dive() -> void:
 	var submerged: bool = world.is_submerged(dragon.global_position)
+	dragon.set("submerged", submerged)
 	world.ensure_underwater(dragon.global_position)
 	if dive_overlay != null:
 		dive_overlay.visible = submerged
@@ -291,6 +292,8 @@ func _update_hud() -> void:
 	if biome_label == null or dragon == null:
 		return
 	biome_label.text = "Flying over  %s   ·   %s" % [world.biome_name_at(dragon.global_position), compass_point()]
+	if world.is_submerged(dragon.global_position):
+		biome_label.text += "   ·   DIVING"
 	status_label.text = "WASD / arrows steer   •   R new world   •   F1 hide"
 	var window := get_window()
 	var extra := ""

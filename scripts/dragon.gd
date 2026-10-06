@@ -11,6 +11,11 @@ var turn_smooth: float = 0.0
 var steering := Vector2.ZERO
 var paused: bool = false
 var energy_boost: float = 0.0
+# Set by the controller: true while below the waterline in water.
+var submerged: bool = false
+var heading: float = 0.0
+var fold: float = 0.0
+var swim_phase: float = 0.0
 
 
 func _ready() -> void:
@@ -29,18 +34,29 @@ func _process(delta: float) -> void:
 	# Hold A/D ~2s for a full U-turn.
 	var turn_in: float = clampf(horizontal + steering.x, -1.0, 1.0)
 	turn_smooth = lerpf(turn_smooth, turn_in, 1.0 - exp(-6.0 * delta))
-	rotation.y -= turn_in * TURN_RATE * delta
+	heading -= turn_in * TURN_RATE * delta
+	# Swimming mode: wings fold back, body undulates like a fish.
+	fold = lerpf(fold, 1.0 if submerged else 0.0, 1.0 - exp(-3.0 * delta))
+	var wobble := 0.0
+	if fold > 0.01:
+		swim_phase += delta * 7.0
+		wobble = sin(swim_phase) * 0.12 * fold
+	rotation.y = heading + wobble
 	var climb: float = vertical + steering.y
 	# Floor -2.0 reaches deep lake basins; terrain collision in the
 	# controller keeps the body out of rock.
 	altitude = clampf(altitude + climb * 18.0 * delta, -2.0, 92.0)
-	var desired_y: float = altitude + sin(flight_time * 0.72) * 2.2
+	var bob: float = sin(flight_time * 0.72) * 2.2 * (1.0 - fold * 0.7)
+	var desired_y: float = altitude + bob
 	var facing := Vector3(-sin(rotation.y), 0.0, -cos(rotation.y))
 	position += facing * (flight_speed + energy_boost * 10.0) * delta
 	position.y = lerpf(position.y, desired_y, 1.0 - exp(-2.0 * delta))
 	rotation.z = lerpf(rotation.z, clampf(-turn_smooth * 0.4, -0.5, 0.5), 1.0 - exp(-4.0 * delta))
-	rotation.x = lerpf(rotation.x, clampf(climb * 0.12, -0.3, 0.3), 1.0 - exp(-3.0 * delta)) + sin(flight_time * 0.72) * 0.02
-	var flap: float = sin(flight_time * 6.2) * 0.58 + 0.08
+	rotation.x = lerpf(rotation.x, clampf(climb * 0.12, -0.3, 0.3), 1.0 - exp(-3.0 * delta)) + sin(flight_time * 0.72) * 0.02 * (1.0 - fold)
+	var amp: float = 0.58 * (1.0 - fold * 0.92)
+	var flap: float = sin(flight_time * 6.2) * amp + 0.08 * (1.0 - fold) + 0.02
+	left_wing.rotation.y = fold * 1.2
+	right_wing.rotation.y = -fold * 1.2
 	left_wing.rotation.z = flap
 	right_wing.rotation.z = -flap
 	steering = steering.move_toward(Vector2.ZERO, delta * 1.25)
