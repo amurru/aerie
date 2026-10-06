@@ -47,14 +47,26 @@ func _ready() -> void:
 
 
 func _process(delta: float) -> void:
-	world.update_follow(dragon.global_position.z)
-	var target: Vector3 = dragon.global_position + Vector3(0.0, 7.6, 19.0)
+	world.update_follow(dragon.global_position)
+	# Camera lags sideways on purpose: full follow would cancel out the visual
+	# of steering and make turns invisible. Partial follow keeps parallax.
+	var target := Vector3(
+		dragon.global_position.x * 0.72,
+		dragon.global_position.y + 7.6,
+		dragon.global_position.z + 19.0
+	)
 	chase_camera.global_position = chase_camera.global_position.lerp(target, 1.0 - exp(-2.7 * delta))
-	chase_camera.look_at(dragon.global_position + Vector3(0.0, 0.1, -3.8), Vector3.UP)
+	chase_camera.look_at(dragon.global_position + Vector3(lateral_lead() * 0.35, 0.1, -3.8), Vector3.UP)
 	hud_timer -= delta
 	if hud_timer <= 0.0:
 		_update_hud()
 		hud_timer = 0.35
+
+
+func lateral_lead() -> float:
+	if dragon != null and "lateral_drift" in dragon:
+		return float(dragon.get("lateral_drift"))
+	return 0.0
 
 
 func _setup_input() -> void:
@@ -101,32 +113,48 @@ func _setup_environment() -> void:
 	environment.background_mode = Environment.BG_SKY
 	var sky := Sky.new()
 	var sky_material := ProceduralSkyMaterial.new()
-	sky_material.sky_top_color = Color("416b91")
-	sky_material.sky_horizon_color = Color("e3a16e")
-	sky_material.sky_curve = 0.8
-	sky_material.ground_bottom_color = Color("293c45")
-	sky_material.ground_horizon_color = Color("d79b6a")
-	sky_material.ground_curve = 0.04
+	sky_material.sky_top_color = Color("2f6cb0")
+	sky_material.sky_horizon_color = Color("a9c6de")
+	sky_material.sky_curve = 0.55
+	sky_material.sky_energy_multiplier = 0.9
+	sky_material.ground_bottom_color = Color("2f3d44")
+	sky_material.ground_horizon_color = Color("7d9cbd")
+	sky_material.ground_curve = 0.18
+	sky_material.ground_energy_multiplier = 0.6
 	sky_material.sun_angle_max = 18.0
 	sky.sky_material = sky_material
 	environment.sky = sky
 	environment.ambient_light_source = Environment.AMBIENT_SOURCE_SKY
-	environment.ambient_light_energy = 0.48
-	environment.tonemap_mode = Environment.TONE_MAPPER_FILMIC
+	environment.ambient_light_energy = 0.38
+	environment.tonemap_mode = Environment.TONE_MAPPER_ACES
+	environment.tonemap_exposure = 0.9
+	environment.adjustment_enabled = true
+	environment.adjustment_saturation = 1.3
+	environment.adjustment_contrast = 1.06
 	environment.fog_enabled = true
-	environment.fog_light_color = Color("c68f70")
-	environment.fog_density = 0.0015
+	environment.fog_light_color = Color("a9c4de")
+	environment.fog_density = 0.00045
+	environment.fog_sky_affect = 0.15
 	world_environment.environment = environment
 	add_child(world_environment)
 	var sun := DirectionalLight3D.new()
 	sun.name = "Late_summer_sun"
-	sun.rotation_degrees = Vector3(-34.0, -32.0, 0.0)
-	sun.light_color = Color("ffe0b2")
-	sun.light_energy = 0.92
+	sun.rotation_degrees = Vector3(-38.0, -32.0, 0.0)
+	sun.light_color = Color("fff2df")
+	sun.light_energy = 0.85
 	sun.shadow_enabled = true
 	sun.directional_shadow_max_distance = 240.0
 	add_child(sun)
 	sun_light = sun
+	# Fill from the camera side: backlit faces (dragon tail, downhill slopes)
+	# otherwise go near-black under a single key light. No shadows, subtle.
+	var fill := DirectionalLight3D.new()
+	fill.name = "Camera_fill"
+	fill.rotation_degrees = Vector3(-12.0, 148.0, 0.0)
+	fill.light_color = Color("cfe0ff")
+	fill.light_energy = 0.3
+	fill.shadow_enabled = false
+	add_child(fill)
 
 
 func _setup_camera() -> void:
@@ -181,7 +209,7 @@ func _setup_hud() -> void:
 func _update_hud() -> void:
 	if biome_label == null or dragon == null:
 		return
-	biome_label.text = "Flying over  %s" % world.biome_name_at(dragon.global_position.z)
+	biome_label.text = "Flying over  %s" % world.biome_name_at(dragon.global_position)
 	status_label.text = "WASD / arrows steer   •   R new world   •   F1 hide"
 	var window := get_window()
 	var extra := ""
@@ -208,7 +236,7 @@ func _unhandled_input(event: InputEvent) -> void:
 				window.mode = Window.MODE_WINDOWED if window.mode == Window.MODE_FULLSCREEN else Window.MODE_FULLSCREEN
 				get_viewport().set_input_as_handled()
 			KEY_R:
-				world.regenerate_at(dragon.global_position.z)
+				world.regenerate_at(dragon.global_position)
 				_update_hud()
 				get_viewport().set_input_as_handled()
 			KEY_SPACE:

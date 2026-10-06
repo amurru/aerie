@@ -9,7 +9,7 @@ var event_bus: AerieEventBus
 var dragon: Node3D
 var world: Node3D
 var sun: DirectionalLight3D
-var base_sun_energy: float = 0.92
+var base_sun_energy: float = 0.85
 
 var _flash: float = 0.0
 var _entries: Array[Dictionary] = []
