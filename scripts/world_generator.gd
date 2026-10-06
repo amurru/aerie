@@ -15,6 +15,22 @@ var broad_noise: FastNoiseLite
 var detail_noise: FastNoiseLite
 var ridge_noise: FastNoiseLite
 var _biome_cache: Dictionary = {}
+var _volc_lights: Array[OmniLight3D] = []
+var _volc_phase: Array[float] = []
+var _volc_time: float = 0.0
+
+
+func _process(_delta: float) -> void:
+	# Magma glow flicker for active volcanoes.
+	if _volc_lights.is_empty():
+		return
+	_volc_time += _delta
+	for i in range(_volc_lights.size()):
+		var lamp: OmniLight3D = _volc_lights[i]
+		if not is_instance_valid(lamp):
+			continue
+		var p: float = _volc_phase[i]
+		lamp.light_energy = 2.6 + sin(_volc_time * 7.0 + p) * 0.5 + sin(_volc_time * 13.0 + p * 2.0) * 0.3
 
 
 func _ready() -> void:
@@ -59,6 +75,11 @@ func update_follow(dragon_pos: Vector3) -> void:
 			var old_chunk: Node3D = chunks[key]
 			chunks.erase(key)
 			old_chunk.queue_free()
+	# Drop flicker refs whose volcano chunk was recycled.
+	for i in range(_volc_lights.size() - 1, -1, -1):
+		if not is_instance_valid(_volc_lights[i]):
+			_volc_lights.remove_at(i)
+			_volc_phase.remove_at(i)
 
 
 func regenerate_at(dragon_pos: Vector3) -> void:
@@ -66,6 +87,8 @@ func regenerate_at(dragon_pos: Vector3) -> void:
 		old_chunk.queue_free()
 	chunks.clear()
 	_biome_cache.clear()
+	_volc_lights.clear()
+	_volc_phase.clear()
 	world_seed = randi_range(1, 2000000000)
 	_configure_noise()
 	update_follow(dragon_pos)
@@ -401,6 +424,8 @@ func _add_volcano(parent: Node3D, row: int, col: int) -> void:
 	var local_z: float = -CHUNK_LENGTH * 0.55
 	var world_z: float = -float(row) * CHUNK_LENGTH + local_z
 	var ground: float = _height_open(float(col) * WORLD_WIDTH + x, world_z)
+	# Not every volcano erupts: deterministic active/dormant split per cell.
+	var active: bool = absi(row * 31 + col * 17 + world_seed) % 10 < 6
 	var cone := MeshInstance3D.new()
 	cone.name = "Seven_sided_volcanic_cone"
 	var cone_mesh := CylinderMesh.new()
@@ -409,25 +434,96 @@ func _add_volcano(parent: Node3D, row: int, col: int) -> void:
 	cone_mesh.height = 54.0
 	cone_mesh.radial_segments = 7
 	cone_mesh.rings = 1
-	cone_mesh.material = _solid_material(Color("554a3f"))
+	cone_mesh.material = _solid_material(Color("3a2f28") if active else Color("554a3f"))
 	cone.mesh = cone_mesh
 	cone.position = Vector3(x, ground + 25.0, local_z)
 	parent.add_child(cone)
 	var crater := MeshInstance3D.new()
-	crater.name = "Lava_crater"
+	crater.name = "Lava_crater" if active else "Cold_crater"
 	var crater_mesh := CylinderMesh.new()
 	crater_mesh.top_radius = 8.0
 	crater_mesh.bottom_radius = 8.0
 	crater_mesh.height = 0.55
 	crater_mesh.radial_segments = 8
-	var lava_material := _solid_material(Color("ff6a23"))
-	lava_material.emission_enabled = true
-	lava_material.emission = Color("ff4a0d")
-	lava_material.emission_energy_multiplier = 1.8
-	crater_mesh.material = lava_material
+	if active:
+		var lava_material := _solid_material(Color("ff6a23"))
+		lava_material.emission_enabled = true
+		lava_material.emission = Color("ff4a0d")
+		lava_material.emission_energy_multiplier = 2.5
+		crater_mesh.material = lava_material
+	else:
+		crater_mesh.material = _solid_material(Color("2b2522"))
 	crater.mesh = crater_mesh
 	crater.position = Vector3(x, ground + 52.7, local_z)
 	parent.add_child(crater)
+	if not active:
+		return
+	var glow := OmniLight3D.new()
+	glow.name = "MagmaGlow"
+	glow.light_color = Color("ff5a1a")
+	glow.light_energy = 2.6
+	glow.omni_range = 70.0
+	glow.position = Vector3(x, ground + 56.0, local_z)
+	parent.add_child(glow)
+	_volc_lights.append(glow)
+	_volc_phase.append(randf() * TAU)
+	_add_embers(parent, x, ground + 53.0, local_z)
+	_add_smoke(parent, x, ground + 56.0, local_z)
+
+
+func _add_embers(parent: Node3D, x: float, y: float, local_z: float) -> void:
+	var sparks := CPUParticles3D.new()
+	sparks.name = "Embers"
+	sparks.amount = 48
+	sparks.lifetime = 2.6
+	sparks.lifetime_randomness = 0.4
+	sparks.local_coords = false
+	sparks.emission_shape = CPUParticles3D.EMISSION_SHAPE_SPHERE
+	sparks.emission_sphere_radius = 5.0
+	sparks.direction = Vector3(0.0, 1.0, 0.0)
+	sparks.spread = 18.0
+	sparks.initial_velocity_min = 7.0
+	sparks.initial_velocity_max = 13.0
+	sparks.gravity = Vector3(0.0, 2.0, 0.0)
+	sparks.damping_min = 0.5
+	sparks.damping_max = 1.5
+	var ember_mesh := SphereMesh.new()
+	ember_mesh.radius = 0.16
+	ember_mesh.height = 0.32
+	var mat := StandardMaterial3D.new()
+	mat.albedo_color = Color("ff8a2a")
+	mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	ember_mesh.material = mat
+	sparks.mesh = ember_mesh
+	sparks.position = Vector3(x, y, local_z)
+	sparks.emitting = true
+	parent.add_child(sparks)
+
+
+func _add_smoke(parent: Node3D, x: float, y: float, local_z: float) -> void:
+	var smoke := CPUParticles3D.new()
+	smoke.name = "SmokeColumn"
+	smoke.amount = 36
+	smoke.lifetime = 5.0
+	smoke.lifetime_randomness = 0.3
+	smoke.local_coords = false
+	smoke.emission_shape = CPUParticles3D.EMISSION_SHAPE_SPHERE
+	smoke.emission_sphere_radius = 3.5
+	smoke.direction = Vector3(0.15, 1.0, 0.0)
+	smoke.spread = 10.0
+	smoke.initial_velocity_min = 6.0
+	smoke.initial_velocity_max = 10.0
+	smoke.gravity = Vector3(0.0, 1.0, 0.0)
+	var puff_mesh := BoxMesh.new()
+	puff_mesh.size = Vector3(2.2, 2.2, 2.2)
+	var mat := StandardMaterial3D.new()
+	mat.albedo_color = Color("4a4a52")
+	mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	puff_mesh.material = mat
+	smoke.mesh = puff_mesh
+	smoke.position = Vector3(x, y, local_z)
+	smoke.emitting = true
+	parent.add_child(smoke)
 
 
 func _solid_material(color: Color) -> StandardMaterial3D:
