@@ -87,6 +87,8 @@ func _focus_point() -> Vector3:
 func lightning_at(world_pos: Vector3, tint: Color) -> void:
 	_prune_if_needed(2)
 	_flash = minf(1.0, _flash + 0.85)
+	if event_bus != null:
+		event_bus.publish_thunder(1.0)
 	var root := Node3D.new()
 	root.name = "LightningBolt"
 	root.position = world_pos

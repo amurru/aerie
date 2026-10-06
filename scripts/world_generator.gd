@@ -64,6 +64,19 @@ func nearest_volcano(dragon_pos: Vector3, max_dist: float) -> int:
 	return best
 
 
+func volcano_proximity(dragon_pos: Vector3) -> float:
+	var closest := 1e20
+	for v in _volcanoes:
+		var glow: Object = v.get("glow")
+		if glow == null or not is_instance_valid(glow):
+			continue
+		var anchor: Vector3 = v.get("anchor", Vector3.ZERO)
+		closest = minf(closest, dragon_pos.distance_to(anchor))
+	if closest >= 1e19:
+		return 0.0
+	return clampf(1.0 - closest / 220.0, 0.0, 1.0)
+
+
 func try_erupt(index: int, duration: float) -> bool:
 	if index < 0 or index >= _volcanoes.size():
 		return false

@@ -8,6 +8,7 @@ const AudioReactor = preload("res://scripts/audio_reactor.gd")
 const ExternalEventServer = preload("res://scripts/external_event_server.gd")
 const FxManager = preload("res://scripts/fx_manager.gd")
 const EnvironmentDirector = preload("res://scripts/environment_director.gd")
+const SfxManager = preload("res://scripts/sfx_manager.gd")
 
 var dragon: Node3D
 var world: Node3D
@@ -28,6 +29,9 @@ var audio_reactor: AerieAudioReactor
 var event_server: AerieExternalEventServer
 var fx_manager: AerieFxManager
 var environment_director: AerieEnvironmentDirector
+# Untyped on purpose: avoids a parse-time dependency on the global class
+# cache, so this file loads even before a rescan registers new managers.
+var sfx_manager
 
 
 func _ready() -> void:
@@ -54,6 +58,7 @@ func _ready() -> void:
 func _process(delta: float) -> void:
 	world.update_follow(dragon.global_position)
 	_shout_eruption_check()
+	_update_ambience()
 	# Chase behind the heading so free flight and U-turns read correctly.
 	# Slight lateral lag keeps steering parallax visible.
 	var facing := Vector3(-sin(dragon.rotation.y), 0.0, -cos(dragon.rotation.y))
@@ -80,6 +85,15 @@ func _near_volcano_hint() -> String:
 	return ""
 
 
+func _update_ambience() -> void:
+	if sfx_manager == null:
+		return
+	var weather := "Clear"
+	if environment_director != null:
+		weather = environment_director.weather
+	sfx_manager.set_ambience(weather, world.volcano_proximity(dragon.global_position))
+
+
 func _shout_eruption_check() -> void:
 	if audio_reactor == null or not audio_reactor.enabled:
 		return
@@ -88,6 +102,8 @@ func _shout_eruption_check() -> void:
 	var index: int = world.nearest_volcano(dragon.global_position, 150.0)
 	if index >= 0 and world.try_erupt(index, 12.0):
 		event_bus.publish_beat(1.0)
+		if sfx_manager != null:
+			sfx_manager.eruption_boom()
 
 
 func _setup_input() -> void:
@@ -121,6 +137,10 @@ func _setup_interactivity() -> void:
 	environment_director.name = "EnvironmentDirector"
 	add_child(environment_director)
 	environment_director.setup(environment_ref, sky_material_ref, sun_light, fill_light, chase_camera, dragon, fx_manager)
+	sfx_manager = SfxManager.new()
+	sfx_manager.name = "SfxManager"
+	add_child(sfx_manager)
+	sfx_manager.setup(event_bus)
 
 
 func _add_key_action(action_name: String, keycodes: Array[int]) -> void:
