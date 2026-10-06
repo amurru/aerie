@@ -8,6 +8,7 @@ var altitude: float = 63.0
 var lateral_drift: float = 0.0
 var steering := Vector2.ZERO
 var paused: bool = false
+var energy_boost: float = 0.0
 
 
 func _ready() -> void:
@@ -19,13 +20,14 @@ func _process(delta: float) -> void:
 	if paused:
 		return
 	flight_time += delta
+	energy_boost = maxf(0.0, energy_boost - delta * 0.8)
 	var horizontal: float = Input.get_axis("move_left", "move_right")
 	var vertical: float = Input.get_axis("move_down", "move_up")
 	lateral_drift = move_toward(lateral_drift, horizontal * 23.0 + steering.x * 23.0, 34.0 * delta)
 	altitude = clampf(altitude + (vertical + steering.y) * 18.0 * delta, 28.0, 92.0)
 	var desired_y: float = altitude + sin(flight_time * 0.72) * 2.2
 	position.x += lateral_drift * delta
-	position.z -= flight_speed * delta
+	position.z -= (flight_speed + energy_boost * 10.0) * delta
 	position.y = lerpf(position.y, desired_y, 1.0 - exp(-2.0 * delta))
 	rotation.y = lerp_angle(rotation.y, clampf(-lateral_drift * 0.012, -0.34, 0.34), 1.0 - exp(-2.6 * delta))
 	rotation.x = sin(flight_time * 0.72) * 0.035
@@ -38,6 +40,15 @@ func _process(delta: float) -> void:
 func add_mouse_steer(relative: Vector2) -> void:
 	steering.x = clampf(steering.x + relative.x * 0.0018, -1.0, 1.0)
 	steering.y = clampf(steering.y - relative.y * 0.0018, -1.0, 1.0)
+
+
+func add_energy_boost(strength: float) -> void:
+	energy_boost = clampf(energy_boost + strength, 0.0, 1.5)
+
+
+func add_impulse(lateral: float, vertical: float) -> void:
+	steering.x = clampf(steering.x + lateral, -1.0, 1.0)
+	steering.y = clampf(steering.y + vertical, -1.0, 1.0)
 
 
 func _build_dragon() -> void:

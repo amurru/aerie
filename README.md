@@ -31,6 +31,9 @@ It opens fullscreen by default; press **F11** to switch fullscreen/windowed mode
 | Middle mouse button | Capture or release mouse for steering |
 | `R` | Generate a fresh random world around the dragon |
 | `Space` | Pause / resume flight |
+| `L` | Debug: simulate Discord notification (lightning) |
+| `B` | Debug: simulate voice beat (floaters + boost) |
+| `M` | Toggle voice reactivity |
 | `F1` | Hide / show the HUD |
 | `F11` | Toggle fullscreen / windowed |
 | `Esc` | Release a captured mouse |
@@ -48,5 +51,10 @@ Check the [current Hyprland Window Rules documentation](https://wiki.hypr.land/C
 - `scripts/world_generator.gd`: biome selection, terrain scale/colors, mesh density, chunk length, and prop counts.
 - `scripts/dragon.gd`: flight speed, height limits, wing articulation, and steering response.
 - `scripts/wallpaper.gd`: camera framing, sky, lighting, fullscreen default, and HUD.
+- `scripts/audio_reactor.gd`: voice level, beat threshold, mic vs monitor source.
+- `scripts/fx_manager.gd`: lightning bolts, floater pool, sun flash decay.
+- `scripts/external_event_server.gd`: TCP `127.0.0.1:42420` + `/tmp/aerie-events.jsonl`.
+
+See `docs/EVENTS.md` for voice + notification wiring (`tools/aerie-bridge.py`, `tools/notify_to_aerie.sh`).
 
 This is a source project, not an exported Linux binary. Godot 4 on the target Arch machine runs it directly.

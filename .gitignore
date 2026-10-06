@@ -1,3 +1,6 @@
 .godot/
 .export/
 *.import
+
+__pycache__/
+*.pyc

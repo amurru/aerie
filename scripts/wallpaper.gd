@@ -2,20 +2,37 @@ extends Node3D
 
 const WorldGenerator = preload("res://scripts/world_generator.gd")
 const DragonFlight = preload("res://scripts/dragon.gd")
+const EventBus = preload("res://scripts/event_bus.gd")
+const InputManager = preload("res://scripts/input_manager.gd")
+const AudioReactor = preload("res://scripts/audio_reactor.gd")
+const ExternalEventServer = preload("res://scripts/external_event_server.gd")
+const FxManager = preload("res://scripts/fx_manager.gd")
 
 var dragon: Node3D
 var world: Node3D
 var chase_camera: Camera3D
+var sun_light: DirectionalLight3D
 var hud_panel: PanelContainer
 var biome_label: Label
 var status_label: Label
 var hud_visible: bool = true
 var paused: bool = false
 var hud_timer: float = 0.0
+var event_bus: AerieEventBus
+var input_manager: AerieInputManager
+var audio_reactor: AerieAudioReactor
+var event_server: AerieExternalEventServer
+var fx_manager: AerieFxManager
 
 
 func _ready() -> void:
-	_setup_input()
+	event_bus = EventBus.new()
+	event_bus.name = "AerieEventBus"
+	add_child(event_bus)
+	input_manager = InputManager.new()
+	input_manager.name = "InputManager"
+	add_child(input_manager)
+	input_manager.setup()
 	_setup_environment()
 	world = WorldGenerator.new()
 	world.name = "Streaming_world"
@@ -25,6 +42,7 @@ func _ready() -> void:
 	add_child(dragon)
 	_setup_camera()
 	_setup_hud()
+	_setup_interactivity()
 	_update_hud()
 
 
@@ -40,10 +58,32 @@ func _process(delta: float) -> void:
 
 
 func _setup_input() -> void:
+	# Kept for backward compatibility; real setup lives in InputManager.
+	if input_manager != null:
+		input_manager.setup()
+		return
 	_add_key_action("move_left", [KEY_A, KEY_LEFT])
 	_add_key_action("move_right", [KEY_D, KEY_RIGHT])
 	_add_key_action("move_up", [KEY_W, KEY_UP])
 	_add_key_action("move_down", [KEY_S, KEY_DOWN])
+
+
+func _setup_interactivity() -> void:
+	fx_manager = FxManager.new()
+	fx_manager.name = "FxManager"
+	add_child(fx_manager)
+	fx_manager.setup(event_bus, dragon, world, sun_light)
+	audio_reactor = AudioReactor.new()
+	audio_reactor.name = "AudioReactor"
+	add_child(audio_reactor)
+	audio_reactor.setup(event_bus)
+	event_server = ExternalEventServer.new()
+	event_server.name = "ExternalEventServer"
+	add_child(event_server)
+	var tcp_port := 42420
+	if OS.has_environment("AERIE_EVENT_PORT"):
+		tcp_port = int(OS.get_environment("AERIE_EVENT_PORT"))
+	event_server.setup(event_bus, tcp_port)
 
 
 func _add_key_action(action_name: String, keycodes: Array[int]) -> void:
@@ -86,6 +126,7 @@ func _setup_environment() -> void:
 	sun.shadow_enabled = true
 	sun.directional_shadow_max_distance = 240.0
 	add_child(sun)
+	sun_light = sun
 
 
 func _setup_camera() -> void:
@@ -142,12 +183,16 @@ func _update_hud() -> void:
 		return
 	biome_label.text = "Flying over  %s" % world.biome_name_at(dragon.global_position.z)
 	status_label.text = "WASD / arrows steer   •   R new world   •   F1 hide"
-	var tree := get_tree()
 	var window := get_window()
+	var extra := ""
+	if audio_reactor != null:
+		extra = "   •   voice %.2f" % audio_reactor.current_level
 	if paused:
-		status_label.text = "PAUSED   •   SPACE resume   •   F1 hide"
+		status_label.text = "PAUSED   •   SPACE resume   •   F1 hide" + extra
 	elif window.mode == Window.MODE_FULLSCREEN:
-		status_label.text = "WASD / arrows steer   •   R new world   •   F11 window"
+		status_label.text = "WASD / arrows steer   •   R new world   •   F11 window" + extra
+	else:
+		status_label.text += extra
 	hud_panel.visible = hud_visible
 
 
@@ -169,6 +214,19 @@ func _unhandled_input(event: InputEvent) -> void:
 			KEY_SPACE:
 				paused = not paused
 				dragon.paused = paused
+				_update_hud()
+				get_viewport().set_input_as_handled()
+			KEY_L:
+				# Debug: simulate Discord notification -> lightning.
+				event_bus.publish_notification("Discord", "Test ping", "lightning check")
+				get_viewport().set_input_as_handled()
+			KEY_B:
+				# Debug: simulate voice beat -> floaters + boost.
+				event_bus.publish_beat(0.8)
+				get_viewport().set_input_as_handled()
+			KEY_M:
+				# Debug: toggle voice reactivity.
+				audio_reactor.enabled = not audio_reactor.enabled
 				_update_hud()
 				get_viewport().set_input_as_handled()
 			KEY_ESCAPE:

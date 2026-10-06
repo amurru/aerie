@@ -68,6 +68,11 @@ func biome_name_at(dragon_z: float) -> String:
 	return BIOMES[_biome_index(index)]
 
 
+func get_ground_height(x: float, world_z: float) -> float:
+	var index: int = int(floor(-world_z / CHUNK_LENGTH))
+	return _height(x, world_z, index)
+
+
 func _biome_index(index: int) -> int:
 	var rng := RandomNumberGenerator.new()
 	rng.seed = abs(world_seed + index * 104729) + 1
