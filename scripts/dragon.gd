@@ -1,11 +1,13 @@
 extends Node3D
 
+const TURN_RATE: float = 1.5
+
 var left_wing: Node3D
 var right_wing: Node3D
 var flight_time: float = 0.0
 var flight_speed: float = 27.0
 var altitude: float = 63.0
-var lateral_drift: float = 0.0
+var turn_smooth: float = 0.0
 var steering := Vector2.ZERO
 var paused: bool = false
 var energy_boost: float = 0.0
@@ -23,16 +25,19 @@ func _process(delta: float) -> void:
 	energy_boost = maxf(0.0, energy_boost - delta * 0.8)
 	var horizontal: float = Input.get_axis("move_left", "move_right")
 	var vertical: float = Input.get_axis("move_down", "move_up")
-	var climb_input: float = vertical + steering.y
-	lateral_drift = move_toward(lateral_drift, horizontal * 30.0 + steering.x * 30.0, 50.0 * delta)
-	altitude = clampf(altitude + climb_input * 18.0 * delta, 28.0, 92.0)
+	# Open flight: steering yaws the heading, dragon advances along it.
+	# Hold A/D ~2s for a full U-turn.
+	var turn_in: float = clampf(horizontal + steering.x, -1.0, 1.0)
+	turn_smooth = lerpf(turn_smooth, turn_in, 1.0 - exp(-6.0 * delta))
+	rotation.y -= turn_in * TURN_RATE * delta
+	var climb: float = vertical + steering.y
+	altitude = clampf(altitude + climb * 18.0 * delta, 28.0, 92.0)
 	var desired_y: float = altitude + sin(flight_time * 0.72) * 2.2
-	position.x += lateral_drift * delta
-	position.z -= (flight_speed + energy_boost * 10.0) * delta
+	var facing := Vector3(-sin(rotation.y), 0.0, -cos(rotation.y))
+	position += facing * (flight_speed + energy_boost * 10.0) * delta
 	position.y = lerpf(position.y, desired_y, 1.0 - exp(-2.0 * delta))
-	rotation.y = lerp_angle(rotation.y, clampf(-lateral_drift * 0.022, -0.55, 0.55), 1.0 - exp(-4.0 * delta))
-	rotation.z = lerpf(rotation.z, clampf(lateral_drift * 0.018, -0.45, 0.45), 1.0 - exp(-4.0 * delta))
-	rotation.x = lerpf(rotation.x, clampf(-climb_input * 0.12, -0.3, 0.3), 1.0 - exp(-3.0 * delta)) + sin(flight_time * 0.72) * 0.02
+	rotation.z = lerpf(rotation.z, clampf(-turn_smooth * 0.4, -0.5, 0.5), 1.0 - exp(-4.0 * delta))
+	rotation.x = lerpf(rotation.x, clampf(climb * 0.12, -0.3, 0.3), 1.0 - exp(-3.0 * delta)) + sin(flight_time * 0.72) * 0.02
 	var flap: float = sin(flight_time * 6.2) * 0.58 + 0.08
 	left_wing.rotation.z = flap
 	right_wing.rotation.z = -flap

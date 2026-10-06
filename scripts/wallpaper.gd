@@ -48,25 +48,24 @@ func _ready() -> void:
 
 func _process(delta: float) -> void:
 	world.update_follow(dragon.global_position)
-	# Camera lags sideways on purpose: full follow would cancel out the visual
-	# of steering and make turns invisible. Partial follow keeps parallax.
-	var target := Vector3(
-		dragon.global_position.x * 0.72,
-		dragon.global_position.y + 7.6,
-		dragon.global_position.z + 19.0
-	)
+	# Chase behind the heading so free flight and U-turns read correctly.
+	# Slight lateral lag keeps steering parallax visible.
+	var facing := Vector3(-sin(dragon.rotation.y), 0.0, -cos(dragon.rotation.y))
+	var target: Vector3 = dragon.global_position - facing * 19.0 + Vector3(0.0, 7.6, 0.0)
 	chase_camera.global_position = chase_camera.global_position.lerp(target, 1.0 - exp(-2.7 * delta))
-	chase_camera.look_at(dragon.global_position + Vector3(lateral_lead() * 0.35, 0.1, -3.8), Vector3.UP)
+	chase_camera.look_at(dragon.global_position + facing * 4.0 + Vector3(0.0, 0.1, 0.0), Vector3.UP)
 	hud_timer -= delta
 	if hud_timer <= 0.0:
 		_update_hud()
 		hud_timer = 0.35
 
 
-func lateral_lead() -> float:
-	if dragon != null and "lateral_drift" in dragon:
-		return float(dragon.get("lateral_drift"))
-	return 0.0
+func compass_point() -> String:
+	var points := ["N", "NE", "E", "SE", "S", "SW", "W", "NW"]
+	var idx: int = int(round(-dragon.rotation.y / (PI / 4.0))) % 8
+	if idx < 0:
+		idx += 8
+	return points[idx]
 
 
 func _setup_input() -> void:
@@ -209,7 +208,7 @@ func _setup_hud() -> void:
 func _update_hud() -> void:
 	if biome_label == null or dragon == null:
 		return
-	biome_label.text = "Flying over  %s" % world.biome_name_at(dragon.global_position)
+	biome_label.text = "Flying over  %s   ·   %s" % [world.biome_name_at(dragon.global_position), compass_point()]
 	status_label.text = "WASD / arrows steer   •   R new world   •   F1 hide"
 	var window := get_window()
 	var extra := ""
