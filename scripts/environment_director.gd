@@ -31,6 +31,7 @@ var weather: String = "Clear"
 var weather_sun: float = 1.0
 var weather_fog: float = 0.00045
 var weather_dark: float = 0.0
+var submerged: bool = false
 var _weather_timer: float = 90.0
 var _storm_timer: float = 5.0
 var _rain: CPUParticles3D
@@ -356,7 +357,9 @@ func _update_rain() -> void:
 	if _rain == null or camera == null:
 		return
 	_rain.global_position = camera.global_position + Vector3(0.0, 8.0, 0.0)
-	_rain.emitting = weather == "Storm"
+	# No rain below the surface: hidden the frame you dive.
+	_rain.visible = not submerged
+	_rain.emitting = weather == "Storm" and not submerged
 
 
 func _update_storm(delta: float) -> void:

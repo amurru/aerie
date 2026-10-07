@@ -63,9 +63,13 @@ func _process(delta: float) -> void:
 	_collide_terrain()
 	_update_dive()
 	# Chase behind the heading so free flight and U-turns read correctly.
-	# Slight lateral lag keeps steering parallax visible.
+	# Tucks in close while swimming so the camera dives with the dragon
+	# instead of watching through the surface.
 	var facing := Vector3(-sin(dragon.rotation.y), 0.0, -cos(dragon.rotation.y))
-	var target: Vector3 = dragon.global_position - facing * 19.0 + Vector3(0.0, 7.6, 0.0)
+	var fold: float = float(dragon.get("fold"))
+	var cam_back := lerpf(19.0, 12.0, fold)
+	var cam_up := lerpf(7.6, 4.0, fold)
+	var target: Vector3 = dragon.global_position - facing * cam_back + Vector3(0.0, cam_up, 0.0)
 	chase_camera.global_position = chase_camera.global_position.lerp(target, 1.0 - exp(-2.7 * delta))
 	var cam_ground: float = world.get_ground_height(chase_camera.global_position.x, chase_camera.global_position.z)
 	chase_camera.global_position.y = maxf(chase_camera.global_position.y, cam_ground + 1.0)
@@ -94,7 +98,9 @@ func _collide_terrain() -> void:
 func _update_dive() -> void:
 	var submerged: bool = world.is_submerged(dragon.global_position)
 	dragon.set("submerged", submerged)
+	environment_director.submerged = submerged
 	world.ensure_underwater(dragon.global_position)
+	world.set_dive(submerged)
 	if dive_overlay != null:
 		dive_overlay.visible = submerged
 	if sfx_manager != null and sfx_manager.has_method("set_underwater"):

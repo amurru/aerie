@@ -97,6 +97,14 @@ func _build_dragon() -> void:
 	_add_box("Tail_spade", Vector3(0.0, 0.12, 4.92), Vector3(0.95, 0.24, 0.65), Color("d9904f"))
 	left_wing = _create_wing(-1.0)
 	right_wing = _create_wing(1.0)
+	# Headlamp: readability while diving and at night.
+	var lamp := OmniLight3D.new()
+	lamp.name = "DiveLamp"
+	lamp.light_color = Color("bfe0ff")
+	lamp.light_energy = 0.7
+	lamp.omni_range = 26.0
+	lamp.position = Vector3(0.0, 1.2, -3.0)
+	add_child(lamp)
 	for spike in range(6):
 		_add_box("Back_spine", Vector3(0.0, 0.78, 1.0 - float(spike) * 0.72), Vector3(0.25, 0.56, 0.4), Color("e39a4f"))
 

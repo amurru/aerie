@@ -14,7 +14,9 @@ var chunks: Dictionary = {}
 var broad_noise: FastNoiseLite
 var detail_noise: FastNoiseLite
 var ridge_noise: FastNoiseLite
+var river_noise: FastNoiseLite
 var _biome_cache: Dictionary = {}
+var _water_cache: Dictionary = {}
 var _volcanoes: Array[Dictionary] = []
 var _volc_time: float = 0.0
 
@@ -22,10 +24,22 @@ var _sea_pool: Array[Node3D] = []
 var _sea_bubbles: CPUParticles3D
 var _sea_center := Vector3(0.0, 0.0, 0.0)
 var _sea_built := false
+var _water_mats: Array[StandardMaterial3D] = []
+var _dive_alpha := 1.0
+var _dive_target := 1.0
 
 
 func _process(_delta: float) -> void:
 	# Magma glow flicker for active volcanoes; eruption state machine.
+	_dive_alpha = lerpf(_dive_alpha, _dive_target, 1.0 - exp(-_delta * 3.0))
+	for i in range(_water_mats.size() - 1, -1, -1):
+		var mat: StandardMaterial3D = _water_mats[i]
+		if not is_instance_valid(mat):
+			_water_mats.remove_at(i)
+			continue
+		var c: Color = mat.albedo_color
+		c.a = _dive_alpha
+		mat.albedo_color = c
 	if _volcanoes.is_empty():
 		return
 	_volc_time += _delta
@@ -122,6 +136,12 @@ func _configure_noise() -> void:
 	ridge_noise.fractal_octaves = 2
 	ridge_noise.noise_type = FastNoiseLite.TYPE_SIMPLEX
 
+	river_noise = FastNoiseLite.new()
+	river_noise.seed = world_seed + 101
+	river_noise.frequency = 0.0011
+	river_noise.fractal_octaves = 2
+	river_noise.noise_type = FastNoiseLite.TYPE_SIMPLEX_SMOOTH
+
 
 func update_follow(dragon_pos: Vector3) -> void:
 	# Open world: symmetric radius in every direction so U-turns and free
@@ -148,6 +168,8 @@ func regenerate_at(dragon_pos: Vector3) -> void:
 		old_chunk.queue_free()
 	chunks.clear()
 	_biome_cache.clear()
+	_water_cache.clear()
+	_water_mats.clear()
 	_volcanoes.clear()
 	world_seed = randi_range(1, 2000000000)
 	_configure_noise()
@@ -155,21 +177,76 @@ func regenerate_at(dragon_pos: Vector3) -> void:
 
 
 func biome_name_at(dragon_pos: Vector3) -> String:
-	return BIOMES[_biome_index(_cell_at(dragon_pos.x, dragon_pos.z))]
+	if _river_weight(dragon_pos.x, dragon_pos.z) > 0.5 and _height_open(dragon_pos.x, dragon_pos.z) < WATER_LEVEL:
+		return "River"
+	var cell := _cell_at(dragon_pos.x, dragon_pos.z)
+	if _water_class(cell) == WC_SEA:
+		return "Sea"
+	return BIOMES[_biome_index(cell)]
 
 
 func get_ground_height(x: float, world_z: float) -> float:
 	return _height_open(x, world_z)
 
 
-const WATER_LEVEL := 16.0
+const WATER_LEVEL := 8.0
+
+# Water classes from neighborhood smoothing: scattered water cells merge
+# into lakes, 3+ neighbors upgrade to sea, opposite pairs read as rivers.
+const WC_NONE := 0
+const WC_LAKE := 1
+const WC_SEA := 2
+const WC_RIVER := 3
 
 
 func water_at(x_abs: float, world_z: float) -> bool:
-	match BIOMES[_biome_index(_cell_at(x_abs, world_z))]:
-		"Lake country", "Steppe", "Forest":
-			return true
-	return false
+	# Anything below the waterline holds water: the plane spans every chunk.
+	return _height_open(x_abs, world_z) < WATER_LEVEL - 0.4
+
+
+func _is_water_biome(biome_index: int) -> bool:
+	return BIOMES[biome_index] == "Lake country" or BIOMES[biome_index] == "Steppe" or BIOMES[biome_index] == "Forest"
+
+
+func _water_class(cell: Vector2i) -> int:
+	if _water_cache.has(cell):
+		return _water_cache[cell]
+	var wet := {}
+	var count := 0
+	for dz in [-1, 0, 1]:
+		for dx in [-1, 0, 1]:
+			var c := cell + Vector2i(dx, dz)
+			var w: bool = _is_water_biome(_raw_biome(c))
+			wet[Vector2i(dx, dz)] = w
+			if w:
+				count += 1
+	var result := WC_NONE
+	if wet[Vector2i.ZERO]:
+		if count >= 4:
+			result = WC_SEA
+		elif count == 3 and _is_opposite_pair(wet):
+			result = WC_RIVER
+		else:
+			result = WC_LAKE
+	elif count >= 5:
+		# Dry cell ringed by water joins the lake.
+		result = WC_LAKE
+	_water_cache[cell] = result
+	return result
+
+
+func _is_opposite_pair(wet: Dictionary) -> bool:
+	var ns: bool = wet[Vector2i(0, -1)] and wet[Vector2i(0, 1)]
+	var ew: bool = wet[Vector2i(-1, 0)] and wet[Vector2i(1, 0)]
+	var d1: bool = wet[Vector2i(-1, -1)] and wet[Vector2i(1, 1)]
+	var d2: bool = wet[Vector2i(-1, 1)] and wet[Vector2i(1, -1)]
+	return ns or ew or d1 or d2
+
+
+func _river_weight(x_abs: float, world_z: float) -> float:
+	# Winding river band, position-based so channels run for kilometers
+	# regardless of cell borders.
+	return 1.0 - smoothstep(0.06, 0.14, absf(river_noise.get_noise_2d(x_abs, world_z)))
 
 
 func is_submerged(dragon_pos: Vector3) -> bool:
@@ -315,31 +392,47 @@ func _spawn_chunk(row: int, col: int) -> void:
 		_add_ice_spires(chunk, row, col)
 	elif biome == "Volcano":
 		_add_volcano(chunk, row, col)
-	if biome == "Lake country" or biome == "Steppe" or biome == "Forest":
-		_add_water(chunk, biome)
+	# One opaque plane per chunk: terrain above the waterline hides it, so
+	# seas, merged lakes, rivers, and desert oases all read correctly.
+	_add_water(chunk, row, col)
 
 
-func _height_for_biome(x: float, world_z: float, biome_index: int) -> float:
+func _height_for_biome(x: float, world_z: float, biome_index: int, wc: int) -> float:
 	var broad: float = broad_noise.get_noise_2d(x, world_z)
 	var detail: float = detail_noise.get_noise_2d(x, world_z)
 	var ridge: float = 1.0 - abs(ridge_noise.get_noise_2d(x, world_z))
+	var h: float
 	match BIOMES[biome_index]:
 		"Mountains":
-			return 22.0 + pow(ridge, 1.45) * 36.0 + broad * 7.0 + detail * 4.0
+			h = 22.0 + pow(ridge, 1.45) * 36.0 + broad * 7.0 + detail * 4.0
 		"Glacier":
-			return 28.0 + pow(ridge, 1.7) * 30.0 + broad * 7.0 + detail * 2.0
+			h = 28.0 + pow(ridge, 1.7) * 30.0 + broad * 7.0 + detail * 2.0
 		"Volcano":
-			return 20.0 + broad * 11.0 + detail * 6.0 + ridge * 9.0
+			h = 20.0 + broad * 11.0 + detail * 6.0 + ridge * 9.0
 		"Forest":
-			return 21.0 + broad * 14.0 + detail * 3.0 - _basin(broad, -0.25, 10.0)
+			h = 21.0 + broad * 14.0 + detail * 3.0 - _basin(broad, -0.25, 10.0)
 		"Desert":
-			return 15.0 + abs(broad) * 8.5 + detail * 3.0 + sin(world_z * 0.024 + x * 0.012) * 3.5
+			h = 15.0 + abs(broad) * 8.5 + detail * 3.0 + sin(world_z * 0.024 + x * 0.012) * 3.5
 		"Lake country":
-			return 17.0 + broad * 5.0 + detail * 1.3 - _basin(broad, -0.1, 14.0)
+			h = 17.0 + broad * 5.0 + detail * 1.3 - _basin(broad, -0.1, 14.0)
 		"Highlands":
-			return 24.0 + abs(broad) * 18.0 + ridge * 8.0 + detail * 4.0
+			h = 24.0 + abs(broad) * 18.0 + ridge * 8.0 + detail * 4.0
 		_:
-			return 19.0 + broad * 8.0 + detail * 2.5 + sin(x * 0.018) * 2.0 - _basin(broad, -0.2, 8.0)
+			h = 19.0 + broad * 8.0 + detail * 2.5 + sin(x * 0.018) * 2.0 - _basin(broad, -0.2, 8.0)
+	if wc == WC_SEA:
+		# Pull toward a rolling seabed instead of clipping to a ceiling:
+		# ceilings terrace whole cells into straight-edged plateaus.
+		var floor_h: float = 2.5 + detail * 2.0
+		h = lerpf(h - 4.0, floor_h, 0.8)
+	elif wc == WC_LAKE and not _is_water_biome(biome_index):
+		# Dry cell absorbed by a neighboring lake: pull below the shoreline
+		# (an islet may survive where the base was very high).
+		h = lerpf(h - 3.0, 5.5 + detail * 1.0, 0.8)
+	# Winding river channel, positional so it runs across cell borders.
+	var rw: float = _river_weight(x, world_z)
+	if rw > 0.0:
+		h = lerpf(h, minf(h, WATER_LEVEL - 7.5 + detail * 0.5), rw)
+	return h
 
 
 func _basin(broad: float, edge: float, depth: float) -> float:
@@ -353,27 +446,27 @@ func _height_open(x_abs: float, world_z: float) -> float:
 	# axes. Midpoint (0.5/0.5) exactly on shared edges, so neighbor chunks
 	# compute identical values and seams match.
 	var cell := _cell_at(x_abs, world_z)
-	var h: float = _height_for_biome(x_abs, world_z, _biome_index(cell))
+	var h: float = _height_for_biome(x_abs, world_z, _biome_index(cell), _water_class(cell))
 	var origin_x: float = float(cell.x) * WORLD_WIDTH - WORLD_WIDTH * 0.5
 	var u: float = (x_abs - origin_x) / WORLD_WIDTH
 	if u < EDGE_BLEND:
 		var n := Vector2i(cell.x - 1, cell.y)
 		var w: float = 0.5 * (1.0 - smoothstep(0.0, EDGE_BLEND, u))
-		h = lerpf(_height_for_biome(x_abs, world_z, _biome_index(n)), h, 1.0 - w)
+		h = lerpf(_height_for_biome(x_abs, world_z, _biome_index(n), _water_class(n)), h, 1.0 - w)
 	elif u > 1.0 - EDGE_BLEND:
 		var n2 := Vector2i(cell.x + 1, cell.y)
 		var w2: float = 0.5 * (1.0 - smoothstep(0.0, EDGE_BLEND, 1.0 - u))
-		h = lerpf(_height_for_biome(x_abs, world_z, _biome_index(n2)), h, 1.0 - w2)
+		h = lerpf(_height_for_biome(x_abs, world_z, _biome_index(n2), _water_class(n2)), h, 1.0 - w2)
 	var origin_z: float = -float(cell.y + 1) * CHUNK_LENGTH
 	var t: float = (world_z - origin_z) / CHUNK_LENGTH
 	if t < EDGE_BLEND:
 		var n3 := Vector2i(cell.x, cell.y + 1)
 		var w3: float = 0.5 * (1.0 - smoothstep(0.0, EDGE_BLEND, t))
-		h = lerpf(_height_for_biome(x_abs, world_z, _biome_index(n3)), h, 1.0 - w3)
+		h = lerpf(_height_for_biome(x_abs, world_z, _biome_index(n3), _water_class(n3)), h, 1.0 - w3)
 	elif t > 1.0 - EDGE_BLEND:
 		var n4 := Vector2i(cell.x, cell.y - 1)
 		var w4: float = 0.5 * (1.0 - smoothstep(0.0, EDGE_BLEND, 1.0 - t))
-		h = lerpf(_height_for_biome(x_abs, world_z, _biome_index(n4)), h, 1.0 - w4)
+		h = lerpf(_height_for_biome(x_abs, world_z, _biome_index(n4), _water_class(n4)), h, 1.0 - w4)
 	return snappedf(h, 1.0)
 
 
@@ -381,31 +474,31 @@ func _color_open(x_abs: float, world_z: float, height: float, detail: float) -> 
 	# Same edge weights as _height_open, applied to colors so tint borders
 	# stay continuous too.
 	var cell := _cell_at(x_abs, world_z)
-	var c: Color = _ground_color(_biome_index(cell), height, detail)
+	var c: Color = _ground_color(_biome_index(cell), height, detail, _water_class(cell))
 	var origin_x: float = float(cell.x) * WORLD_WIDTH - WORLD_WIDTH * 0.5
 	var u: float = (x_abs - origin_x) / WORLD_WIDTH
 	if u < EDGE_BLEND:
 		var n := Vector2i(cell.x - 1, cell.y)
 		var w: float = 0.5 * (1.0 - smoothstep(0.0, EDGE_BLEND, u))
-		c = _ground_color(_biome_index(n), height, detail).lerp(c, 1.0 - w)
+		c = _ground_color(_biome_index(n), height, detail, _water_class(n)).lerp(c, 1.0 - w)
 	elif u > 1.0 - EDGE_BLEND:
 		var n2 := Vector2i(cell.x + 1, cell.y)
 		var w2: float = 0.5 * (1.0 - smoothstep(0.0, EDGE_BLEND, 1.0 - u))
-		c = _ground_color(_biome_index(n2), height, detail).lerp(c, 1.0 - w2)
+		c = _ground_color(_biome_index(n2), height, detail, _water_class(n2)).lerp(c, 1.0 - w2)
 	var origin_z: float = -float(cell.y + 1) * CHUNK_LENGTH
 	var t: float = (world_z - origin_z) / CHUNK_LENGTH
 	if t < EDGE_BLEND:
 		var n3 := Vector2i(cell.x, cell.y + 1)
 		var w3: float = 0.5 * (1.0 - smoothstep(0.0, EDGE_BLEND, t))
-		c = _ground_color(_biome_index(n3), height, detail).lerp(c, 1.0 - w3)
+		c = _ground_color(_biome_index(n3), height, detail, _water_class(n3)).lerp(c, 1.0 - w3)
 	elif t > 1.0 - EDGE_BLEND:
 		var n4 := Vector2i(cell.x, cell.y - 1)
 		var w4: float = 0.5 * (1.0 - smoothstep(0.0, EDGE_BLEND, 1.0 - t))
-		c = _ground_color(_biome_index(n4), height, detail).lerp(c, 1.0 - w4)
+		c = _ground_color(_biome_index(n4), height, detail, _water_class(n4)).lerp(c, 1.0 - w4)
 	return c
 
 
-func _ground_color(biome_index: int, height: float, detail: float) -> Color:
+func _ground_color(biome_index: int, height: float, detail: float, wc: int) -> Color:
 	var low: Color
 	var high: Color
 	var snow_line: float = 1000.0
@@ -438,7 +531,12 @@ func _ground_color(biome_index: int, height: float, detail: float) -> Color:
 			high = Color("8fd14f")
 	var blend: float = clampf((height - 28.0) / 60.0, 0.0, 0.85)
 	var color: Color = low.lerp(high, blend)
-	return color * (1.0 + detail * 0.045)
+	color = color * (1.0 + detail * 0.045)
+	if wc != WC_NONE and height < WATER_LEVEL:
+		# Depth-graded bed: shallow sand-teal sinking toward deep teal.
+		var depth: float = clampf((WATER_LEVEL - height) / 14.0, 0.0, 1.0)
+		color = color.lerp(Color("1d5a5e"), 0.25 + depth * 0.6)
+	return color
 
 
 func _add_terrain(parent: Node3D, row: int, col: int, biome_index: int) -> void:
@@ -487,20 +585,61 @@ func _add_colored_triangle(surface: SurfaceTool, a: Vector3, b: Vector3, c: Vect
 		surface.add_vertex(point)
 
 
-func _add_water(parent: Node3D, biome: String) -> void:
+func _water_color_at(x_abs: float, world_z: float) -> Color:
+	# Depth-graded surface: shallow aqua sinking to deep navy, teal rivers.
+	# Sampled per-vertex from the same height field, so shared chunk edges
+	# compute identical values and no tint seam appears.
+	var depth: float = WATER_LEVEL - _height_open(x_abs, world_z)
+	var t: float = clampf(depth / 10.0, 0.0, 1.0)
+	var c: Color = Color("3fb6c9").lerp(Color("0a3a7a"), t)
+	var rw: float = _river_weight(x_abs, world_z)
+	if rw > 0.3:
+		c = c.lerp(Color("3a8a7a"), rw * 0.6)
+	return c
+
+
+func _add_water(parent: Node3D, row: int, col: int) -> void:
 	var water := MeshInstance3D.new()
 	water.name = "Still_water"
-	var plane := PlaneMesh.new()
-	plane.size = Vector2(WORLD_WIDTH - 10.0, CHUNK_LENGTH)
-	water.mesh = plane
-	water.position = Vector3(0.0, 16.0, -CHUNK_LENGTH * 0.5)
+	var surface := SurfaceTool.new()
+	surface.begin(Mesh.PRIMITIVE_TRIANGLES)
 	var water_material := StandardMaterial3D.new()
-	# Opaque: transparency blended the pale terrain underneath into cyan.
-	water_material.albedo_color = Color("1470d4") if biome == "Lake country" else Color("1c74c4")
+	# Opaque-look surface that can fade while diving so the swimmer stays
+	# visible: transparency on, alpha driven toward 1.0 / 0.45 in _process.
+	water_material.vertex_color_use_as_albedo = true
+	water_material.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
 	water_material.roughness = 0.3
 	water_material.metallic = 0.0
-	water.material_override = water_material
+	# Unculled: visible from above, and from below while diving.
+	water_material.cull_mode = BaseMaterial3D.CULL_DISABLED
+	surface.set_material(water_material)
+	# Full chunk span with coincident edge verts: no coverage gap, no seam.
+	var gx := 24
+	var gz := 10
+	var base_x: float = float(col) * WORLD_WIDTH
+	var base_z: float = -float(row) * CHUNK_LENGTH
+	for j in range(gz):
+		for i in range(gx):
+			var x0: float = -WORLD_WIDTH * 0.5 + WORLD_WIDTH * float(i) / gx
+			var x1: float = -WORLD_WIDTH * 0.5 + WORLD_WIDTH * float(i + 1) / gx
+			var z0: float = -CHUNK_LENGTH * float(j) / gz
+			var z1: float = -CHUNK_LENGTH * float(j + 1) / gz
+			var quad := [Vector3(x0, WATER_LEVEL, z0), Vector3(x1, WATER_LEVEL, z0), Vector3(x1, WATER_LEVEL, z1), Vector3(x0, WATER_LEVEL, z1)]
+			for v in [quad[0], quad[1], quad[2]]:
+				surface.set_color(_water_color_at(base_x + v.x, base_z + v.z))
+				surface.add_vertex(v)
+			for v in [quad[0], quad[2], quad[3]]:
+				surface.set_color(_water_color_at(base_x + v.x, base_z + v.z))
+				surface.add_vertex(v)
+	surface.generate_normals()
+	water.mesh = surface.commit()
+	water.position = Vector3.ZERO
 	parent.add_child(water)
+	_water_mats.append(water_material)
+
+
+func set_dive(diving: bool) -> void:
+	_dive_target = 0.45 if diving else 1.0
 
 
 func _new_multimesh(mesh: Mesh, transforms: Array[Transform3D], parent: Node3D, node_name: String) -> void:
@@ -541,6 +680,8 @@ func _add_forest(parent: Node3D, row: int, col: int) -> void:
 			x += signf(x) * 20.0 if absf(x) > 0.1 else 25.0
 		var z: float = -rng.randf_range(8.0, CHUNK_LENGTH - 8.0)
 		var ground: float = _height_open(float(col) * WORLD_WIDTH + x, -float(row) * CHUNK_LENGTH + z)
+		if ground < WATER_LEVEL - 1.0:
+			continue
 		var scale: float = rng.randf_range(0.72, 1.32)
 		var base := Vector3(x, ground, z)
 		trunks.append(Transform3D(Basis().scaled(Vector3(scale, scale, scale)), base + Vector3(0.0, 1.9 * scale, 0.0)))
@@ -567,6 +708,8 @@ func _add_cacti(parent: Node3D, row: int, col: int) -> void:
 			x += 27.0 if x >= 0.0 else -27.0
 		var z: float = -rng.randf_range(10.0, CHUNK_LENGTH - 10.0)
 		var ground: float = _height_open(float(col) * WORLD_WIDTH + x, -float(row) * CHUNK_LENGTH + z)
+		if ground < WATER_LEVEL - 1.0:
+			continue
 		var s: float = rng.randf_range(0.75, 1.35)
 		transforms.append(Transform3D(Basis().scaled(Vector3(s, s, s)), Vector3(x, ground + 1.55 * s, z)))
 	_new_multimesh(cactus_mesh, transforms, parent, "Desert_succulents")
@@ -588,6 +731,8 @@ func _add_ice_spires(parent: Node3D, row: int, col: int) -> void:
 			x += 30.0 if x >= 0.0 else -30.0
 		var z: float = -rng.randf_range(12.0, CHUNK_LENGTH - 12.0)
 		var ground: float = _height_open(float(col) * WORLD_WIDTH + x, -float(row) * CHUNK_LENGTH + z)
+		if ground < WATER_LEVEL - 1.0:
+			continue
 		var scale: float = rng.randf_range(0.65, 1.65)
 		transforms.append(Transform3D(Basis().rotated(Vector3.UP, rng.randf_range(0.0, TAU)).scaled(Vector3(scale, scale, scale)), Vector3(x, ground + 3.8 * scale, z)))
 	_new_multimesh(ice_mesh, transforms, parent, "Ice_spires")
