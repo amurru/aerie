@@ -596,16 +596,37 @@ func _add_colored_triangle(surface: SurfaceTool, a: Vector3, b: Vector3, c: Vect
 
 
 func _water_color_at(x_abs: float, world_z: float) -> Color:
-	# Depth-graded surface: shallow aqua sinking to deep navy, teal rivers.
-	# Sampled per-vertex from the same height field, so shared chunk edges
-	# compute identical values and no tint seam appears.
+	# Depth-graded surface: pale shelf water sinking through teal and blue
+	# toward abyssal navy, teal rivers. Sampled per-vertex from the same
+	# height field, so shared chunk edges compute identical values and no
+	# tint seam appears.
 	var depth: float = WATER_LEVEL - _height_open(x_abs, world_z)
-	var t: float = clampf(depth / 10.0, 0.0, 1.0)
-	var c: Color = Color("3fb6c9").lerp(Color("0a3a7a"), t)
+	var c: Color = _depth_ramp(depth)
 	var rw: float = _river_weight(x_abs, world_z)
 	if rw > 0.3:
 		c = c.lerp(Color("3a8a7a"), rw * 0.6)
 	return c
+
+
+func _depth_ramp(depth: float) -> Color:
+	# Multi-stop ramp so depth reads at a glance: bright shallows over
+	# shorelines, dark open water over basins and channels.
+	var shelf := Color("5fd0d8")
+	var teal := Color("2a9ab5")
+	var mid := Color("145e9e")
+	var deep := Color("0a3a7a")
+	var abyss := Color("061a3d")
+	if depth <= 0.0:
+		return shelf
+	if depth < 3.0:
+		return shelf.lerp(teal, depth / 3.0)
+	if depth < 6.0:
+		return teal.lerp(mid, (depth - 3.0) / 3.0)
+	if depth < 10.0:
+		return mid.lerp(deep, (depth - 6.0) / 4.0)
+	if depth < 14.0:
+		return deep.lerp(abyss, (depth - 10.0) / 4.0)
+	return abyss
 
 
 func _add_water(parent: Node3D, row: int, col: int) -> void:
@@ -624,8 +645,10 @@ func _add_water(parent: Node3D, row: int, col: int) -> void:
 	water_material.cull_mode = BaseMaterial3D.CULL_DISABLED
 	surface.set_material(water_material)
 	# Full chunk span with coincident edge verts: no coverage gap, no seam.
-	var gx := 24
-	var gz := 10
+	# Dense enough (36x16) that depth tinting resolves basins, channels,
+	# and shorelines instead of blurring across them.
+	var gx := 36
+	var gz := 16
 	var base_x: float = float(col) * WORLD_WIDTH
 	var base_z: float = -float(row) * CHUNK_LENGTH
 	for j in range(gz):
