@@ -1,9 +1,10 @@
 class_name AerieFxManager
 extends Node3D
 
-const MAX_NODES := 48
+const MAX_NODES := 64
 const BOLT_TTL := 1.4
 const FLOATER_TTL := 3.0
+const STREAK_TTL := 0.55
 
 var event_bus: AerieEventBus
 var dragon: Node3D
@@ -57,6 +58,11 @@ func _process(delta: float) -> void:
 			elif kind == "bolt":
 				var f: float = 1.0 - age / ttl
 				node.scale = Vector3(1.0, maxf(0.1, f), 1.0)
+			elif kind == "streak":
+				# Speed lines: race backward past the camera, shrink out.
+				node.position += (e["vel"] as Vector3) * delta
+				var k: float = 1.0 - age / ttl
+				node.scale = Vector3(maxf(0.05, k), maxf(0.05, k), 1.0)
 		i -= 1
 
 
@@ -149,3 +155,37 @@ func _prune_if_needed(incoming: int) -> void:
 		var node := oldest.get("node") as Node
 		if is_instance_valid(node):
 			node.queue_free()
+
+
+func rush_enter(center: Vector3) -> void:
+	# Kick on entering superspeed: sun flash plus a gold burst.
+	_flash = minf(1.0, _flash + 0.7)
+	spawn_floaters(12, center, Color("ffe9a8"))
+
+
+func rush_exit(center: Vector3) -> void:
+	# Soft settle as the rush lets go: a few cool motes falling behind.
+	spawn_floaters(5, center, Color("9fd4ff"))
+
+
+func rush_streak(center: Vector3, facing: Vector3) -> void:
+	# Speed lines: thin stretched boxes seeded around the flight path that
+	# race backward past the camera while the rush holds.
+	_prune_if_needed(3)
+	var mat := StandardMaterial3D.new()
+	mat.albedo_color = Color("d8ecff")
+	mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	var mesh := BoxMesh.new()
+	mesh.size = Vector3(0.09, 0.09, 3.2)
+	mesh.material = mat
+	for i in range(3):
+		var line := MeshInstance3D.new()
+		line.mesh = mesh
+		line.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+		var side := Vector3(-facing.z, 0.0, facing.x)
+		var offset := side * randf_range(-9.0, 9.0) + Vector3(0.0, randf_range(-3.0, 5.0), 0.0) + facing * randf_range(-12.0, 14.0)
+		line.position = center + offset
+		var vel: Vector3 = -facing * randf_range(45.0, 70.0)
+		line.rotation.y = atan2(-vel.x, -vel.z)
+		add_child(line)
+		_entries.append({"node": line, "age": 0.0, "ttl": STREAK_TTL, "kind": "streak", "vel": vel})

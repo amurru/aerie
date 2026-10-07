@@ -24,6 +24,8 @@ var dive_overlay: ColorRect
 var hud_visible: bool = true
 var paused: bool = false
 var hud_timer: float = 0.0
+var _was_rushing: bool = false
+var _rush_fx_timer: float = 0.0
 var event_bus: AerieEventBus
 var input_manager: AerieInputManager
 var audio_reactor: AerieAudioReactor
@@ -74,6 +76,7 @@ func _process(delta: float) -> void:
 	var cam_ground: float = world.get_ground_height(chase_camera.global_position.x, chase_camera.global_position.z)
 	chase_camera.global_position.y = maxf(chase_camera.global_position.y, cam_ground + 1.0)
 	chase_camera.look_at(dragon.global_position + facing * 4.0 + Vector3(0.0, 0.1, 0.0), Vector3.UP)
+	_update_rush_fx(delta)
 	hud_timer -= delta
 	if hud_timer <= 0.0:
 		_update_hud()
@@ -105,6 +108,27 @@ func _update_dive() -> void:
 		dive_overlay.visible = submerged
 	if sfx_manager != null and sfx_manager.has_method("set_underwater"):
 		sfx_manager.set_underwater(submerged)
+
+
+func _update_rush_fx(delta: float) -> void:
+	# Superspeed camera vision: FOV kicks wide while rushing and relaxes
+	# after, speed-line streaks stream past, enter/exit pops mark the ends.
+	var rushing := false
+	if dragon != null and dragon.has_method("rush_active"):
+		rushing = bool(dragon.call("rush_active"))
+	if rushing and not _was_rushing and fx_manager != null:
+		fx_manager.rush_enter(dragon.global_position)
+	if not rushing and _was_rushing and fx_manager != null:
+		fx_manager.rush_exit(dragon.global_position)
+	_was_rushing = rushing
+	var target_fov := 80.0 if rushing else 66.0
+	chase_camera.fov = lerpf(chase_camera.fov, target_fov, 1.0 - exp(-3.0 * delta))
+	if rushing and fx_manager != null:
+		_rush_fx_timer -= delta
+		if _rush_fx_timer <= 0.0:
+			_rush_fx_timer = 0.07
+			var facing := Vector3(-sin(dragon.rotation.y), 0.0, -cos(dragon.rotation.y))
+			fx_manager.rush_streak(dragon.global_position, facing)
 
 
 func _near_volcano_hint() -> String:
@@ -311,13 +335,18 @@ func _update_hud() -> void:
 	if environment_director != null:
 		var clock_note := " (manual)" if environment_director.is_manual_time() else ""
 		extra += "   •   %s%s %s · %s" % [environment_director.time_string(), clock_note, environment_director.period_name(), environment_director.weather]
+	if dragon != null and dragon.has_method("rush_active"):
+		if bool(dragon.call("rush_active")):
+			extra += "   •   RUSH %.0fs" % maxf(0.0, float(dragon.get("rush_time")))
+		elif float(dragon.get("rush_cooldown")) > 0.0:
+			extra += "   •   rush cooldown %.0fs" % maxf(0.0, float(dragon.get("rush_cooldown")))
 	extra += _near_volcano_hint()
 	if paused:
 		status_label.text = "PAUSED   •   SPACE resume   •   F1 hide" + extra
 	elif window.mode == Window.MODE_FULLSCREEN:
-		status_label.text = "WASD / arrows steer   •   R new world   •   F11 window" + extra
+		status_label.text = "WASD / arrows steer   •   R new world   •   F11 window   •   Z rush" + extra
 	else:
-		status_label.text += extra
+		status_label.text += "   •   Z rush" + extra
 	hud_panel.visible = hud_visible
 
 
@@ -358,6 +387,12 @@ func _unhandled_input(event: InputEvent) -> void:
 				# Toggle manual day/night override (system clock otherwise).
 				if environment_director != null and environment_director.has_method("toggle_day_night"):
 					environment_director.toggle_day_night()
+				_update_hud()
+				get_viewport().set_input_as_handled()
+			KEY_Z:
+				# Superspeed rush: 10s zoom with cooldown, air or water.
+				if dragon != null and dragon.has_method("try_rush"):
+					dragon.call("try_rush")
 				_update_hud()
 				get_viewport().set_input_as_handled()
 			KEY_ESCAPE:
