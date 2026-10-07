@@ -37,6 +37,8 @@ var _storm_timer: float = 5.0
 var _rain: CPUParticles3D
 var _time_of_day: float = 12.0
 var _moon: MeshInstance3D
+var _sun_mesh: MeshInstance3D
+var _sun_mat: StandardMaterial3D
 
 # Dynamic cloud deck (replaces the old static per-chunk puffs).
 const DECK_COUNT := 26
@@ -65,6 +67,7 @@ func setup(p_env: Environment, p_sky: ProceduralSkyMaterial, p_sun: DirectionalL
 	_make_rain()
 	_make_deck()
 	_make_moon()
+	_make_sun()
 	_roll_weather(120.0)
 	_apply(1.0)
 
@@ -84,6 +87,7 @@ func _process(delta: float) -> void:
 	_update_storm(delta)
 	_update_deck(delta)
 	_update_moon()
+	_update_sun_mesh()
 
 
 func time_string() -> String:
@@ -174,10 +178,11 @@ func _apply(_delta: float) -> void:
 	sky_material.sky_top_color = top.lerp(top * 0.45, weather_dark)
 	sky_material.sky_horizon_color = hor.lerp(hor * 0.55, weather_dark)
 	sky_material.ground_horizon_color = Color("7d9cbd").lerp(NIGHT_HOR, 1.0 - day_f)
-	# The sky shader's own sun disk does not dim with our light energy, so it
-	# would sit in the night sky as a dark blob. Shrink it away after dusk;
-	# the moon mesh takes over.
-	sky_material.sun_angle_max = lerpf(0.05, 18.0, day_f)
+	# The shader's own sun disk is untrustworthy: its brightness follows the
+	# light energy, so in storms and at dusk it renders darker than the sky
+	# (a black blurry disc). Keep it pinned tiny; our own sun mesh below is
+	# the visible sun.
+	sky_material.sun_angle_max = 0.15
 	environment.fog_light_color = fog_c
 	environment.fog_density = weather_fog
 	var sun_elev: float = lerpf(11.0, _sun_elevation(), day_f)
@@ -327,6 +332,42 @@ func _update_moon() -> void:
 	# frame (and read as a detached studio light).
 	var axis: Vector3 = sun.global_transform.basis.z.normalized()
 	_moon.global_position = camera.global_position + axis * 500.0
+
+
+func _make_sun() -> void:
+	# Our own visible sun, anchored to the real light axis like the moon.
+	# Unshaded, so it stays bright regardless of light energy or weather.
+	_sun_mesh = MeshInstance3D.new()
+	_sun_mesh.name = "DaySun"
+	var sphere := SphereMesh.new()
+	sphere.radius = 1.0
+	sphere.height = 2.0
+	sphere.radial_segments = 16
+	sphere.rings = 8
+	_sun_mat = StandardMaterial3D.new()
+	_sun_mat.albedo_color = Color("fff3d0")
+	_sun_mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	sphere.material = _sun_mat
+	_sun_mesh.mesh = sphere
+	_sun_mesh.scale = Vector3.ONE * 22.0
+	_sun_mesh.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	_sun_mesh.visible = false
+	add_child(_sun_mesh)
+
+
+func _update_sun_mesh() -> void:
+	if _sun_mesh == null or camera == null or sun == null:
+		return
+	var day_f: float = _day_amount()
+	_sun_mesh.visible = day_f > 0.15
+	if not _sun_mesh.visible:
+		return
+	# Dusk orange near the horizon, near-white overhead; storms dim it.
+	var low: float = clampf(1.0 - (sun.rotation_degrees.x - 6.0) / 30.0, 0.0, 1.0)
+	var tint: Color = Color("fff6dc").lerp(Color("ffab4e"), low)
+	_sun_mat.albedo_color = tint * (1.0 - weather_dark * 0.45)
+	var axis: Vector3 = sun.global_transform.basis.z.normalized()
+	_sun_mesh.global_position = camera.global_position + axis * 500.0
 
 
 func _make_rain() -> void:

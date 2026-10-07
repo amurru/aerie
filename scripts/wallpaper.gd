@@ -229,6 +229,9 @@ func _setup_environment() -> void:
 	fill.light_color = Color("cfe0ff")
 	fill.light_energy = 0.3
 	fill.shadow_enabled = false
+	# No sky contribution: every directional light draws its own disk in the
+	# procedural sky, and this dim fill would sit there as a gray blob.
+	fill.sky_mode = DirectionalLight3D.SKY_MODE_LIGHT_ONLY
 	add_child(fill)
 	fill_light = fill
 
