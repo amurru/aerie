@@ -1,14 +1,23 @@
 # Aerie — Skybound
 
-A native **Godot 4** interactive 3D wallpaper prototype for Hyprland. A copper-winged dragon flies continuously through an endlessly streamed, voxel-inspired landscape while a smooth third-person camera follows from behind. Each launch gets a new world seed; press `R` to reshuffle while flying.
+A native **Godot 4** interactive 3D wallpaper prototype for Hyprland. A rigged dragon flies freely through an endlessly streamed open world while a smooth third-person camera follows from behind. Each launch gets a new world seed; press `R` to reshuffle while flying.
 
 ## Included
 
-- Low-poly stepped terrain with **steppe, mountains, glaciers, volcanoes, forests, deserts, lake country, and highlands**.
-- Biome-specific colors and props: pine groves, desert plants, ice spires, water, and a lava-crowned volcano.
-- A continuously flying dragon with flapping articulated wings and keyboard / captured-mouse steering.
-- Smooth chase camera, dusk sky, fog, sun shadows, and a hideable HUD.
-- No imported assets, add-ons, or network access required at runtime.
+- Open-world streaming terrain: **steppe, mountains, glaciers, volcanoes, forests, deserts, lake country, highlands**, plus merged **seas**, winding **rivers**, and lake basins deep enough to dive.
+- Water-body clustering: neighboring water cells merge into big lakes and seas; rivers carve positional channels across chunk borders.
+- A rigged CC0 dragon (Quaternius) with a looping flight animation, heading-driven free flight with banking, and U-turns anywhere.
+- **Swimming mode**: dive below the waterline and the wings fold back, the beat slows, the tail sways, and the body pitches into the swim.
+- Real-clock **day/night cycle** with dawn/dusk blends, a light-anchored sun and moon, and a compass in the HUD.
+- Semi-random **weather machine** (Clear / Cloudy / Fog / Storm) with a wind-drifted cloud deck, camera-tracking rain, and lightning strikes.
+- **Shout-to-erupt volcanoes**: loud voice input near a volcano triggers a 12s eruption with lava fountain, magma spill, glow surge, and boom.
+- Voice reactivity (mic analyzed, never played back), ambient beds that mix by weather and volcano proximity, underwater muffle, and external notification hooks.
+- Terrain collision (no flying through mountains), dive camera, and a hideable HUD.
+
+## Assets
+
+- `assets/models/quaternius_dragon.glb` — "Dragon" by Quaternius, CC0 1.0.
+- `assets/audio/bsb_*.ogg` — BigSoundBank / La Sonotheque (Joseph SARDIN), CC0. See `assets/audio/CREDITS.md`.
 
 ## Run on Arch Linux
 
@@ -26,8 +35,8 @@ It opens fullscreen by default; press **F11** to switch fullscreen/windowed mode
 
 | Input | Action |
 |---|---|
-| `W` / `S` or `↑` / `↓` | Climb / descend |
-| `A` / `D` or `←` / `→` | Steer left / right |
+| `W` / `S` or `↑` / `↓` | Climb / descend (dive / surface underwater) |
+| `A` / `D` or `←` / `→` | Turn left / right (hold ~2s for a U-turn) |
 | Middle mouse button | Capture or release mouse for steering |
 | `R` | Generate a fresh random world around the dragon |
 | `Space` | Pause / resume flight |
@@ -48,10 +57,12 @@ Check the [current Hyprland Window Rules documentation](https://wiki.hypr.land/C
 
 ## Tuning
 
-- `scripts/world_generator.gd`: biome selection, terrain scale/colors, mesh density, chunk length, and prop counts.
-- `scripts/dragon.gd`: flight speed, height limits, wing articulation, and steering response.
-- `scripts/wallpaper.gd`: camera framing, sky, lighting, fullscreen default, and HUD.
+- `scripts/world_generator.gd`: biomes, water classes, terrain scale/colors, mesh density, chunk grid, prop counts, volcano kits.
+- `scripts/dragon.gd`: flight speed, height limits, model scale, swim fold, and steering response.
+- `scripts/wallpaper.gd`: camera framing, collision, dive state, HUD.
+- `scripts/environment_director.gd`: day/night clock, weather machine, cloud deck, sun/moon.
 - `scripts/audio_reactor.gd`: voice level, beat threshold, mic vs monitor source.
+- `scripts/sfx_manager.gd`: ambience mix, thunder, eruption boom, underwater muffle.
 - `scripts/fx_manager.gd`: lightning bolts, floater pool, sun flash decay.
 - `scripts/external_event_server.gd`: TCP `127.0.0.1:42420` + `/tmp/aerie-events.jsonl`.
 
