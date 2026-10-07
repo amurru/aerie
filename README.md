@@ -40,6 +40,7 @@ It opens fullscreen by default; press **F11** to switch fullscreen/windowed mode
 | Middle mouse button | Capture or release mouse for steering |
 | `R` | Generate a fresh random world around the dragon |
 | `Space` | Pause / resume flight |
+| `T` | Toggle day / night (manual override; system clock otherwise) |
 | `L` | Debug: simulate Discord notification (lightning) |
 | `B` | Debug: simulate voice beat (floaters + boost) |
 | `M` | Toggle voice reactivity |

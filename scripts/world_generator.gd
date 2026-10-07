@@ -27,6 +27,13 @@ var _sea_built := false
 var _water_mats: Array[StandardMaterial3D] = []
 var _dive_alpha := 1.0
 var _dive_target := 1.0
+# Mesozoic water life: plesiosaurs, ichthyosaur schools, drifting
+# ammonites. One record per creature root (children articulate); chunk
+# recycle frees nodes, invalid entries are pruned in _process.
+var _life: Array[Dictionary] = []
+var _life_time: float = 0.0
+var _life_tick: int = 0
+const MAX_LIFE_NODES := 170
 
 
 func _process(_delta: float) -> void:
@@ -40,6 +47,7 @@ func _process(_delta: float) -> void:
 		var c: Color = mat.albedo_color
 		c.a = _dive_alpha
 		mat.albedo_color = c
+	_update_life(_delta)
 	if _volcanoes.is_empty():
 		return
 	_volc_time += _delta
@@ -170,6 +178,7 @@ func regenerate_at(dragon_pos: Vector3) -> void:
 	_biome_cache.clear()
 	_water_cache.clear()
 	_water_mats.clear()
+	_life.clear()
 	_volcanoes.clear()
 	world_seed = randi_range(1, 2000000000)
 	_configure_noise()
@@ -395,6 +404,7 @@ func _spawn_chunk(row: int, col: int) -> void:
 	# One opaque plane per chunk: terrain above the waterline hides it, so
 	# seas, merged lakes, rivers, and desert oases all read correctly.
 	_add_water(chunk, row, col)
+	_add_aquatic_life(chunk, row, col)
 
 
 func _height_for_biome(x: float, world_z: float, biome_index: int, wc: int) -> float:
@@ -926,3 +936,383 @@ func _solid_material(color: Color) -> StandardMaterial3D:
 	material.albedo_color = color
 	material.roughness = 0.93
 	return material
+
+
+func _add_aquatic_life(parent: Node3D, row: int, col: int) -> void:
+	# Mesozoic seas: plesiosaurs cruise, ichthyosaur pods dart, ammonites
+	# drift. Only some water bodies are populated; placement is
+	# deterministic per cell so reshuffles differ but revisits stay stable.
+	var cell := Vector2i(col, row)
+	var wc: int = _water_class(cell)
+	if wc == WC_NONE:
+		# Rivers carve below the waterline without a lake/sea class: sample
+		# the chunk, treat it as river habitat when genuinely wet.
+		var wet := 0
+		var base_x: float = float(col) * WORLD_WIDTH
+		var base_z: float = -float(row) * CHUNK_LENGTH
+		for sample in [Vector2(-0.3, -0.3), Vector2(0.0, -0.2), Vector2(0.3, -0.3), Vector2(-0.2, -0.6), Vector2(0.2, -0.6), Vector2(0.0, -0.85)]:
+			var wx: float = base_x + sample.x * WORLD_WIDTH
+			var wz: float = base_z + sample.y * CHUNK_LENGTH
+			if water_at(wx, wz):
+				wet += 1
+		if wet < 2:
+			return
+		wc = WC_RIVER
+	var rng := RandomNumberGenerator.new()
+	rng.seed = absi(world_seed + row * 9176 + col * 1543) + 5001
+	# Not every water body gets life: seas almost always, lakes usually,
+	# rivers sometimes.
+	var occupancy := 1.0
+	match wc:
+		WC_SEA:
+			occupancy = 0.95
+		WC_LAKE:
+			occupancy = 0.7
+		_:
+			occupancy = 0.5
+	if rng.randf() > occupancy:
+		return
+	if _life.size() >= MAX_LIFE_NODES:
+		return
+	var schools := 0
+	var plesiosaurs := 0
+	var ammonites := 0
+	match wc:
+		WC_SEA:
+			plesiosaurs = rng.randi_range(1, 2)
+			schools = rng.randi_range(3, 4)
+			ammonites = rng.randi_range(1, 2)
+		WC_LAKE:
+			plesiosaurs = rng.randi_range(0, 1)
+			schools = rng.randi_range(2, 3) if rng.randf() < 0.7 else 0
+			ammonites = rng.randi_range(1, 2)
+		_:
+			schools = 2 if rng.randf() < 0.5 else 0
+	for p in range(plesiosaurs):
+		_spawn_plesiosaur(parent, row, col, rng)
+	if schools > 0:
+		_spawn_ichthy_school(parent, row, col, rng, schools)
+	for a in range(ammonites):
+		_spawn_ammonite(parent, row, col, rng)
+
+
+func _find_water_spot(rng: RandomNumberGenerator, row: int, col: int) -> Vector3:
+	# Returns a chunk-local swim center, or Vector3.INF when no open water
+	# was found after several tries.
+	var base_x: float = float(col) * WORLD_WIDTH
+	var base_z: float = -float(row) * CHUNK_LENGTH
+	for attempt in range(8):
+		var x: float = rng.randf_range(-WORLD_WIDTH * 0.5 + 25.0, WORLD_WIDTH * 0.5 - 25.0)
+		var z: float = -rng.randf_range(12.0, CHUNK_LENGTH - 12.0)
+		var ground: float = _height_open(base_x + x, base_z + z)
+		if ground < WATER_LEVEL - 1.2:
+			var depth_span: float = (WATER_LEVEL - 0.8) - (ground + 1.0)
+			var y: float = ground + 1.0 + clampf(depth_span, 0.5, 4.5) * rng.randf_range(0.3, 0.7)
+			y = clampf(y, ground + 1.0, WATER_LEVEL - 1.0)
+			return Vector3(x, y, z)
+	return Vector3.INF
+
+
+func _still_water_spot(rng: RandomNumberGenerator, row: int, col: int, min_depth: float) -> Vector3:
+	# Like _find_water_spot but prefers room below the surface for tall
+	# creatures (plesiosaur necks): returns a deep spot when found,
+	# otherwise the shallowest water found (necks may breach to breathe).
+	var best := Vector3.INF
+	for attempt in range(4):
+		var spot: Vector3 = _find_water_spot(rng, row, col)
+		if spot == Vector3.INF:
+			continue
+		if spot.y <= WATER_LEVEL - min_depth:
+			return spot
+		if best == Vector3.INF:
+			best = spot
+	return best
+
+
+func _spawn_plesiosaur(parent: Node3D, row: int, col: int, rng: RandomNumberGenerator) -> void:
+	# Long-necked cruiser: hull, raised neck + head with eyes, four paddle
+	# flippers that row, and a tail spike. Slow majestic circles.
+	var center: Vector3 = _still_water_spot(rng, row, col, 2.4)
+	if center == Vector3.INF:
+		return
+	if _life.size() >= MAX_LIFE_NODES:
+		return
+	var hide := _solid_material(Color("5f7f4e"))
+	var dark := _solid_material(Color("465f3c"))
+	var root := Node3D.new()
+	root.name = "Plesiosaur"
+	var body := MeshInstance3D.new()
+	var hull := SphereMesh.new()
+	hull.radius = 0.9
+	hull.height = 1.8
+	hull.radial_segments = 8
+	hull.rings = 4
+	hull.material = hide
+	body.mesh = hull
+	body.scale = Vector3(1.0, 0.8, 1.6)
+	root.add_child(body)
+	var neck := MeshInstance3D.new()
+	var neck_mesh := CylinderMesh.new()
+	neck_mesh.top_radius = 0.2
+	neck_mesh.bottom_radius = 0.34
+	neck_mesh.height = 2.3
+	neck_mesh.radial_segments = 6
+	neck_mesh.material = hide
+	neck.mesh = neck_mesh
+	neck.position = Vector3(0.0, 1.0, -1.5)
+	var neck_base := -0.85
+	neck.rotation.x = neck_base
+	root.add_child(neck)
+	var head := MeshInstance3D.new()
+	var skull := SphereMesh.new()
+	skull.radius = 0.32
+	skull.height = 0.64
+	skull.radial_segments = 6
+	skull.rings = 3
+	skull.material = hide
+	head.mesh = skull
+	head.scale = Vector3(1.0, 0.8, 1.5)
+	head.position = Vector3(0.0, 2.0, -2.5)
+	root.add_child(head)
+	var eye_mat := _solid_material(Color("14100c"))
+	for side in [-1.0, 1.0]:
+		var eye := MeshInstance3D.new()
+		var dot := SphereMesh.new()
+		dot.radius = 0.07
+		dot.height = 0.14
+		dot.material = eye_mat
+		eye.mesh = dot
+		eye.position = Vector3(side * 0.22, 2.1, -2.85)
+		root.add_child(eye)
+	var flip_mesh := BoxMesh.new()
+	flip_mesh.size = Vector3(1.7, 0.14, 0.55)
+	flip_mesh.material = dark
+	var flippers: Array[Node3D] = []
+	var sides: Array[float] = []
+	var fx := [-1.0, 1.0, -1.0, 1.0]
+	var fz := [-0.7, -0.7, 1.0, 1.0]
+	for i in range(4):
+		var flip := MeshInstance3D.new()
+		flip.mesh = flip_mesh
+		flip.position = Vector3(fx[i] * 1.0, -0.25, fz[i])
+		flip.rotation.y = fx[i] * -0.2
+		root.add_child(flip)
+		flippers.append(flip)
+		sides.append(fx[i])
+	var tail := MeshInstance3D.new()
+	var spike := CylinderMesh.new()
+	spike.top_radius = 0.06
+	spike.bottom_radius = 0.3
+	spike.height = 1.7
+	spike.radial_segments = 5
+	spike.material = dark
+	tail.mesh = spike
+	tail.position = Vector3(0.0, 0.15, 2.2)
+	tail.rotation.x = 1.35
+	root.add_child(tail)
+	for c in root.get_children():
+		(c as MeshInstance3D).cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	parent.add_child(root)
+	_life.append({
+		"node": root, "kind": "plesio", "center": center,
+		"radius": rng.randf_range(6.0, 12.0),
+		"speed": rng.randf_range(0.1, 0.18) * (1.0 if rng.randf() < 0.5 else -1.0),
+		"phase": rng.randf_range(0.0, TAU),
+		"flippers": flippers, "sides": sides, "neck": neck,
+		"neck_base": neck_base, "tail": tail,
+	})
+
+
+func _spawn_ichthy_school(parent: Node3D, row: int, col: int, rng: RandomNumberGenerator, count: int) -> void:
+	# Dolphin-shaped sea dragons: torpedo body, snout, dorsal fin, side
+	# paddles, and a vertical tail fluke. Quick pods that porpoise.
+	var center: Vector3 = _find_water_spot(rng, row, col)
+	if center == Vector3.INF:
+		return
+	var slate := _solid_material(Color("46626f"))
+	var fin_mat := _solid_material(Color("2e454f"))
+	var radius: float = rng.randf_range(6.0, 12.0)
+	var speed: float = rng.randf_range(0.35, 0.6) * (1.0 if rng.randf() < 0.5 else -1.0)
+	var phase: float = rng.randf_range(0.0, TAU)
+	for i in range(count):
+		if _life.size() >= MAX_LIFE_NODES:
+			return
+		var root := Node3D.new()
+		root.name = "Ichthyosaur"
+		var body := MeshInstance3D.new()
+		var hull := SphereMesh.new()
+		hull.radius = 0.5
+		hull.height = 1.0
+		hull.radial_segments = 7
+		hull.rings = 4
+		hull.material = slate
+		body.mesh = hull
+		body.scale = Vector3(0.9, 0.95, 2.4)
+		root.add_child(body)
+		var snout := MeshInstance3D.new()
+		var beak := CylinderMesh.new()
+		beak.top_radius = 0.05
+		beak.bottom_radius = 0.28
+		beak.height = 0.9
+		beak.radial_segments = 6
+		beak.material = slate
+		snout.mesh = beak
+		snout.position = Vector3(0.0, 0.05, -1.55)
+		snout.rotation.x = -PI * 0.5
+		root.add_child(snout)
+		var dorsal := MeshInstance3D.new()
+		var fin := PrismMesh.new()
+		fin.size = Vector3(0.12, 0.7, 0.5)
+		fin.material = fin_mat
+		dorsal.mesh = fin
+		dorsal.position = Vector3(0.0, 0.7, 0.2)
+		dorsal.rotation.x = 0.25
+		root.add_child(dorsal)
+		var fluke := MeshInstance3D.new()
+		var tail_fin := PrismMesh.new()
+		tail_fin.size = Vector3(0.1, 1.0, 0.4)
+		tail_fin.material = fin_mat
+		fluke.mesh = tail_fin
+		fluke.position = Vector3(0.0, 0.1, 1.65)
+		root.add_child(fluke)
+		var pad_mesh := BoxMesh.new()
+		pad_mesh.size = Vector3(0.7, 0.1, 0.3)
+		pad_mesh.material = fin_mat
+		for side in [-1.0, 1.0]:
+			var pad := MeshInstance3D.new()
+			pad.mesh = pad_mesh
+			pad.position = Vector3(side * 0.55, -0.15, -0.3)
+			root.add_child(pad)
+		for c in root.get_children():
+			(c as MeshInstance3D).cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+		parent.add_child(root)
+		_life.append({
+			"node": root, "kind": "ichthy", "center": center,
+			"radius": radius * rng.randf_range(0.7, 1.15),
+			"speed": speed * rng.randf_range(0.9, 1.1),
+			"phase": phase + rng.randf_range(-0.6, 0.6),
+			"bob": rng.randf_range(0.5, 1.0), "fluke": fluke,
+		})
+
+
+func _spawn_ammonite(parent: Node3D, row: int, col: int, rng: RandomNumberGenerator) -> void:
+	# Coiled drifters: amber coil shell, pale body, trailing tentacles.
+	# Barely move, slow spin and sway on the current.
+	var center: Vector3 = _find_water_spot(rng, row, col)
+	if center == Vector3.INF:
+		return
+	if _life.size() >= MAX_LIFE_NODES:
+		return
+	var root := Node3D.new()
+	root.name = "Ammonite"
+	var shell := MeshInstance3D.new()
+	var coil := TorusMesh.new()
+	coil.inner_radius = 0.35
+	coil.outer_radius = 0.7
+	coil.rings = 8
+	coil.ring_segments = 12
+	coil.material = _solid_material(Color("b07a3a"))
+	shell.mesh = coil
+	shell.scale = Vector3(1.0, 1.0, 0.7)
+	root.add_child(shell)
+	var body := MeshInstance3D.new()
+	var mantle := SphereMesh.new()
+	mantle.radius = 0.3
+	mantle.height = 0.6
+	mantle.radial_segments = 6
+	mantle.rings = 3
+	mantle.material = _solid_material(Color("d8c8a8"))
+	body.mesh = mantle
+	body.position = Vector3(0.0, -0.15, -0.55)
+	root.add_child(body)
+	var tent_mat := _solid_material(Color("8a6a4a"))
+	var tentacles: Array[Node3D] = []
+	for t in range(5):
+		var arm := MeshInstance3D.new()
+		var cone := CylinderMesh.new()
+		cone.top_radius = 0.09
+		cone.bottom_radius = 0.02
+		cone.height = 0.7
+		cone.radial_segments = 5
+		cone.material = tent_mat
+		arm.mesh = cone
+		var spread: float = (float(t) - 2.0) * 0.18
+		arm.position = Vector3(spread * 1.6, -0.75, -0.55 + absf(spread) * 0.4)
+		arm.rotation.x = 0.15
+		arm.rotation.z = -spread
+		root.add_child(arm)
+		tentacles.append(arm)
+	for c in root.get_children():
+		(c as MeshInstance3D).cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	parent.add_child(root)
+	_life.append({
+		"node": root, "kind": "ammo", "center": center,
+		"phase": rng.randf_range(0.0, TAU), "tentacles": tentacles,
+	})
+
+
+func _update_life(_delta: float) -> void:
+	_life_time += _delta
+	_life_tick += 1
+	var t: float = _life_time
+	for i in range(_life.size() - 1, -1, -1):
+		var entry: Dictionary = _life[i]
+		var obj: Variant = entry.get("node")
+		if not is_instance_valid(obj):
+			_life.remove_at(i)
+			continue
+		# Half the creatures animate each frame (30 Hz sampling, motion
+		# stays continuous since it is driven by absolute time).
+		if ((i + _life_tick) & 1) == 1:
+			continue
+		var node := obj as Node3D
+		var kind := str(entry.get("kind", "plesio"))
+		var center: Vector3 = entry.get("center", Vector3.ZERO)
+		var phase: float = float(entry.get("phase", 0.0))
+		if kind == "plesio":
+			var radius: float = float(entry.get("radius", 8.0))
+			var speed: float = float(entry.get("speed", 0.14))
+			var ang: float = phase + t * speed
+			node.position = center + Vector3(cos(ang) * radius, sin(t * 0.8 + phase) * 0.4, sin(ang) * radius)
+			var dir_sign: float = 1.0 if speed >= 0.0 else -1.0
+			var vel := Vector3(-sin(ang) * dir_sign, 0.0, cos(ang) * dir_sign)
+			node.rotation.y = atan2(-vel.x, -vel.z)
+			# Rowing flippers, swaying neck, lazy tail.
+			var flippers: Array = entry.get("flippers", [])
+			var sides: Array = entry.get("sides", [])
+			for f in range(flippers.size()):
+				var flip := flippers[f] as Node3D
+				if not is_instance_valid(flip):
+					continue
+				var side: float = float(sides[f]) if f < sides.size() else 1.0
+				var lag: float = 1.3 if f >= 2 else 0.0
+				flip.rotation.z = side * (0.15 + sin(t * 2.4 + phase + lag) * 0.4)
+			var neck := entry.get("neck") as Node3D
+			if is_instance_valid(neck):
+				neck.rotation.x = float(entry.get("neck_base", -0.85)) + sin(t * 0.8 + phase) * 0.08
+			var tail := entry.get("tail") as Node3D
+			if is_instance_valid(tail):
+				tail.rotation.y = sin(t * 1.5 + phase) * 0.15
+		elif kind == "ichthy":
+			var radius_i: float = float(entry.get("radius", 8.0))
+			var speed_i: float = float(entry.get("speed", 0.5))
+			var bob: float = float(entry.get("bob", 0.7))
+			var ang_i: float = phase + t * speed_i
+			node.position = center + Vector3(cos(ang_i) * radius_i, sin(t * 1.4 + phase) * bob, sin(ang_i) * radius_i)
+			var dir_i: float = 1.0 if speed_i >= 0.0 else -1.0
+			var vel_i := Vector3(-sin(ang_i) * dir_i, 0.0, cos(ang_i) * dir_i)
+			node.rotation.y = atan2(-vel_i.x, -vel_i.z)
+			node.rotation.x = cos(t * 1.4 + phase) * 0.12
+			node.rotation.z = sin(t * 1.1 + phase) * 0.08
+			var fluke := entry.get("fluke") as Node3D
+			if is_instance_valid(fluke):
+				fluke.rotation.y = sin(t * 5.0 + phase) * 0.35
+		elif kind == "ammo":
+			node.position = center + Vector3(sin(t * 0.25 + phase) * 2.0, sin(t * 0.6 + phase) * 0.8, cos(t * 0.2 + phase) * 2.0)
+			node.rotation.y = phase + t * 0.25
+			node.rotation.z = sin(t * 0.5 + phase) * 0.1
+			var arms: Array = entry.get("tentacles", [])
+			for a in range(arms.size()):
+				var arm := arms[a] as Node3D
+				if is_instance_valid(arm):
+					arm.rotation.x = 0.15 + sin(t * 1.8 + phase + float(a) * 0.7) * 0.18

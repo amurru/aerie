@@ -6,6 +6,9 @@ const MODEL_LENGTH := 6.0
 
 var flight_time: float = 0.0
 var flight_speed: float = 27.0
+# Unrushed underwater cruise: swimming stays slow and drift-like while the
+# wings are folded, instead of racing at flight speed.
+var swim_speed: float = 10.0
 var altitude: float = 63.0
 var turn_smooth: float = 0.0
 var steering := Vector2.ZERO
@@ -60,7 +63,10 @@ func _process(delta: float) -> void:
 	var bob: float = sin(flight_time * 0.72) * 2.2 * (1.0 - fold * 0.7)
 	var desired_y: float = altitude + bob
 	var facing := Vector3(-sin(rotation.y), 0.0, -cos(rotation.y))
-	position += facing * (flight_speed + energy_boost * 10.0) * delta
+	# Easy with the flow: thrust eases from flight speed down to the slow
+	# swim cruise as the wings fold, boost helping less underwater too.
+	var thrust: float = lerpf(flight_speed + energy_boost * 10.0, swim_speed + energy_boost * 4.0, fold)
+	position += facing * thrust * delta
 	position.y = lerpf(position.y, desired_y, 1.0 - exp(-2.0 * delta))
 	rotation.z = lerpf(rotation.z, clampf(-turn_smooth * 0.4, -0.5, 0.5), 1.0 - exp(-4.0 * delta))
 	# Underwater the body pitches into the swim: stronger climb response

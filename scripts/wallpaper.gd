@@ -309,7 +309,8 @@ func _update_hud() -> void:
 	if audio_reactor != null:
 		extra = "   •   voice %.2f" % audio_reactor.current_level
 	if environment_director != null:
-		extra += "   •   %s %s · %s" % [environment_director.time_string(), environment_director.period_name(), environment_director.weather]
+		var clock_note := " (manual)" if environment_director.is_manual_time() else ""
+		extra += "   •   %s%s %s · %s" % [environment_director.time_string(), clock_note, environment_director.period_name(), environment_director.weather]
 	extra += _near_volcano_hint()
 	if paused:
 		status_label.text = "PAUSED   •   SPACE resume   •   F1 hide" + extra
@@ -351,6 +352,12 @@ func _unhandled_input(event: InputEvent) -> void:
 			KEY_M:
 				# Debug: toggle voice reactivity.
 				audio_reactor.enabled = not audio_reactor.enabled
+				_update_hud()
+				get_viewport().set_input_as_handled()
+			KEY_T:
+				# Toggle manual day/night override (system clock otherwise).
+				if environment_director != null and environment_director.has_method("toggle_day_night"):
+					environment_director.toggle_day_night()
 				_update_hud()
 				get_viewport().set_input_as_handled()
 			KEY_ESCAPE:

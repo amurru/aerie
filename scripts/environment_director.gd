@@ -36,6 +36,11 @@ var _weather_timer: float = 90.0
 var _storm_timer: float = 5.0
 var _rain: CPUParticles3D
 var _time_of_day: float = 12.0
+# Manual day/night override (< 0 follows the real system clock).
+# Toggled with T; day/night flips stay put instead of tracking the clock.
+var manual_time: float = -1.0
+const MANUAL_DAY := 12.0
+const MANUAL_NIGHT := 0.0
 var _moon: MeshInstance3D
 var _sun_mesh: MeshInstance3D
 var _sun_mat: StandardMaterial3D
@@ -73,7 +78,7 @@ func setup(p_env: Environment, p_sky: ProceduralSkyMaterial, p_sun: DirectionalL
 
 
 func _process(delta: float) -> void:
-	_time_of_day = _clock_hours()
+	_time_of_day = manual_time if manual_time >= 0.0 else _clock_hours()
 	_weather_timer -= delta
 	if _weather_timer <= 0.0:
 		_roll_weather()
@@ -104,6 +109,21 @@ func period_name() -> String:
 	if _time_of_day < 12.0:
 		return "Dawn"
 	return "Dusk"
+
+
+func is_manual_time() -> bool:
+	return manual_time >= 0.0
+
+
+func toggle_day_night() -> void:
+	# First press pins the opposite of right now; later presses flip
+	# between noon and midnight. The system clock resumes never on its
+	# own; toggle back and forth freely, it just stays where put.
+	if manual_time < 0.0:
+		manual_time = MANUAL_NIGHT if _day_amount() >= 0.5 else MANUAL_DAY
+	else:
+		manual_time = MANUAL_NIGHT if manual_time == MANUAL_DAY else MANUAL_DAY
+	_time_of_day = manual_time
 
 
 func _clock_hours() -> float:
