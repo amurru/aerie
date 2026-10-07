@@ -60,6 +60,7 @@ Check the [current Hyprland Window Rules documentation](https://wiki.hypr.land/C
 ## Tuning
 
 - `scripts/world_generator.gd`: biomes, water classes, terrain scale/colors, mesh density, chunk grid, prop counts, volcano kits.
+- Chunk meshes stream in on worker threads and are assembled on the main thread under a per-frame time budget (`MAX_IN_FLIGHT`, `ASSEMBLE_BUDGET_USEC` in `scripts/world_generator.gd`; the heavy build lives in `scripts/chunk_build.gd`). Set `AERIE_SYNC_STREAM=1` to force the single-threaded sliced path.
 - `scripts/dragon.gd`: flight speed, height limits, model scale, swim fold, and steering response.
 - `scripts/wallpaper.gd`: camera framing, collision, dive state, HUD.
 - `scripts/environment_director.gd`: day/night clock, weather machine, cloud deck, sun/moon.

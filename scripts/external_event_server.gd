@@ -10,7 +10,8 @@ var port: int = DEFAULT_PORT
 var server: TCPServer
 var _peers: Array[StreamPeerTCP] = []
 var _buffers: Dictionary = {}
-var _file_lines_seen: int = 0
+var _file_offset: int = 0
+var _file_partial: String = ""
 var _file_timer: float = 0.0
 
 
@@ -21,7 +22,8 @@ func setup(p_event_bus: AerieEventBus, p_port: int = DEFAULT_PORT) -> void:
 	var err := server.listen(port, DEFAULT_HOST)
 	if err != OK:
 		push_warning("Aerie event server: listen on %d failed: %s" % [port, error_string(err)])
-	_file_lines_seen = _count_file_lines()
+	# Skip whatever is already in the fallback file; only tail new bytes.
+	_file_offset = _file_size(FALLBACK_PATH)
 
 
 func _process(_delta: float) -> void:
@@ -99,16 +101,14 @@ func _handle_event(ev: Dictionary) -> void:
 			event_bus.publish_level(float(ev.get("value", 0.0)))
 
 
-func _count_file_lines() -> int:
-	if not FileAccess.file_exists(FALLBACK_PATH):
+func _file_size(path: String) -> int:
+	if not FileAccess.file_exists(path):
 		return 0
-	var f := FileAccess.open(FALLBACK_PATH, FileAccess.READ)
+	var f := FileAccess.open(path, FileAccess.READ)
 	if f == null:
 		return 0
-	var n := 0
-	while not f.eof_reached():
-		f.get_line()
-		n += 1
+	var n := f.get_length()
+	f.close()
 	return n
 
 
@@ -118,12 +118,20 @@ func _poll_fallback_file() -> void:
 	var f := FileAccess.open(FALLBACK_PATH, FileAccess.READ)
 	if f == null:
 		return
-	var lines: PackedStringArray = []
-	while not f.eof_reached():
-		lines.append(f.get_line())
-	# File was truncated/rotated.
-	if lines.size() < _file_lines_seen:
-		_file_lines_seen = 0
-	for i in range(_file_lines_seen, lines.size()):
+	var length: int = f.get_length()
+	# File was truncated or rotated: restart from the top.
+	if length < _file_offset:
+		_file_offset = 0
+		_file_partial = ""
+	if length == _file_offset:
+		f.close()
+		return
+	# Read only the new bytes, not the whole file every poll.
+	f.seek(_file_offset)
+	var chunk := f.get_buffer(length - _file_offset).get_string_from_utf8()
+	f.close()
+	_file_offset = length
+	var lines := (_file_partial + chunk).split("\n")
+	_file_partial = lines[lines.size() - 1]
+	for i in range(lines.size() - 1):
 		_handle_line(lines[i].strip_edges())
-	_file_lines_seen = lines.size()

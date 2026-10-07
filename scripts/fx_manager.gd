@@ -15,6 +15,42 @@ var base_sun_energy: float = 0.85
 var _flash: float = 0.0
 var _entries: Array[Dictionary] = []
 
+# Shared geometry + materials: rush streaks fire ~14/s and floaters/bolts
+# come in bursts, so allocating a fresh mesh+material each time churned the
+# allocator for no reason.
+var _floater_mesh: SphereMesh
+var _bolt_mesh: BoxMesh
+var _streak_mesh: BoxMesh
+var _streak_mat: StandardMaterial3D
+var _floater_mats: Dictionary = {}
+
+
+func _ensure_fx_resources() -> void:
+	if _floater_mesh != null:
+		return
+	_floater_mesh = SphereMesh.new()
+	_floater_mesh.radius = 0.45
+	_floater_mesh.height = 0.9
+	_bolt_mesh = BoxMesh.new()
+	_bolt_mesh.size = Vector3(0.7, 7.0, 0.7)
+	_streak_mesh = BoxMesh.new()
+	_streak_mesh.size = Vector3(0.09, 0.09, 3.2)
+	_streak_mat = StandardMaterial3D.new()
+	_streak_mat.albedo_color = Color("d8ecff")
+	_streak_mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+
+
+func _floater_material(tint: Color) -> StandardMaterial3D:
+	if _floater_mats.has(tint):
+		return _floater_mats[tint]
+	var mat := StandardMaterial3D.new()
+	mat.albedo_color = tint
+	mat.emission_enabled = true
+	mat.emission = tint
+	mat.emission_energy_multiplier = 1.2
+	_floater_mats[tint] = mat
+	return mat
+
 
 func setup(p_event_bus: AerieEventBus, p_dragon: Node3D, p_world: Node3D, p_sun: DirectionalLight3D) -> void:
 	if event_bus != null and event_bus.notification_received.is_connected(_on_notification):
@@ -92,6 +128,7 @@ func _focus_point() -> Vector3:
 
 func lightning_at(world_pos: Vector3, tint: Color) -> void:
 	_prune_if_needed(2)
+	_ensure_fx_resources()
 	_flash = minf(1.0, _flash + 0.85)
 	if event_bus != null:
 		event_bus.publish_thunder(1.0)
@@ -108,10 +145,8 @@ func lightning_at(world_pos: Vector3, tint: Color) -> void:
 	var x := 0.0
 	for seg in range(5):
 		var block := MeshInstance3D.new()
-		var box := BoxMesh.new()
-		box.size = Vector3(0.7, 7.0, 0.7)
-		box.material = mat
-		block.mesh = box
+		block.mesh = _bolt_mesh
+		block.material_override = mat
 		x += randf_range(-2.2, 2.2)
 		block.position = Vector3(x, -float(seg) * 6.0, randf_range(-1.0, 1.0))
 		block.rotation.z = randf_range(-0.25, 0.25)
@@ -126,18 +161,12 @@ func lightning_at(world_pos: Vector3, tint: Color) -> void:
 
 func spawn_floaters(count: int, center: Vector3, tint: Color) -> void:
 	_prune_if_needed(count)
-	var mat := StandardMaterial3D.new()
-	mat.albedo_color = tint
-	mat.emission_enabled = true
-	mat.emission = tint
-	mat.emission_energy_multiplier = 1.2
+	_ensure_fx_resources()
+	var mat := _floater_material(tint)
 	for i in range(count):
 		var mote := MeshInstance3D.new()
-		var mesh := SphereMesh.new()
-		mesh.radius = 0.45
-		mesh.height = 0.9
-		mesh.material = mat
-		mote.mesh = mesh
+		mote.mesh = _floater_mesh
+		mote.material_override = mat
 		var offset := Vector3(randf_range(-16.0, 16.0), randf_range(-2.0, 5.0), randf_range(-18.0, 6.0))
 		mote.position = center + offset
 		var size := randf_range(0.6, 1.6)
@@ -172,15 +201,11 @@ func rush_streak(center: Vector3, facing: Vector3) -> void:
 	# Speed lines: thin stretched boxes seeded around the flight path that
 	# race backward past the camera while the rush holds.
 	_prune_if_needed(3)
-	var mat := StandardMaterial3D.new()
-	mat.albedo_color = Color("d8ecff")
-	mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
-	var mesh := BoxMesh.new()
-	mesh.size = Vector3(0.09, 0.09, 3.2)
-	mesh.material = mat
+	_ensure_fx_resources()
 	for i in range(3):
 		var line := MeshInstance3D.new()
-		line.mesh = mesh
+		line.mesh = _streak_mesh
+		line.material_override = _streak_mat
 		line.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 		var side := Vector3(-facing.z, 0.0, facing.x)
 		var offset := side * randf_range(-9.0, 9.0) + Vector3(0.0, randf_range(-3.0, 5.0), 0.0) + facing * randf_range(-12.0, 14.0)

@@ -8,6 +8,18 @@ const ROW_RADIUS: int = 4
 const COL_RADIUS: int = 2
 const EDGE_BLEND: float = 0.13
 const BIOMES: Array[String] = ["Steppe", "Mountains", "Glacier", "Volcano", "Forest", "Desert", "Lake country", "Highlands"]
+# Integer biome ids matching BIOMES order. The hot sampling paths match on
+# these instead of comparing strings hundreds of thousands of times per chunk.
+const B_STEPPE := 0
+const B_MOUNTAINS := 1
+const B_GLACIER := 2
+const B_VOLCANO := 3
+const B_FOREST := 4
+const B_DESERT := 5
+const B_LAKE := 6
+const B_HIGHLANDS := 7
+
+const ChunkBuild = preload("res://scripts/chunk_build.gd")
 
 var world_seed: int = 82731
 var chunks: Dictionary = {}
@@ -24,7 +36,15 @@ var _sea_pool: Array[Node3D] = []
 var _sea_bubbles: CPUParticles3D
 var _sea_center := Vector3(0.0, 0.0, 0.0)
 var _sea_built := false
-var _water_mats: Array[StandardMaterial3D] = []
+var _water_material: StandardMaterial3D
+# Water fades while diving. One shared material serves every chunk, so the
+# per-frame update is a single write (and skipped once the fade settles)
+# instead of touching a material per chunk every frame.
+var _water_applied_alpha := -1.0
+# Streaming only changes when the dragon crosses into a new cell, so
+# update_follow early-outs the rest of the frame instead of rescanning the
+# whole chunk grid and volcano list at 60 Hz.
+var _last_follow_center := Vector2i(-9999999, -9999999)
 var _dive_alpha := 1.0
 var _dive_target := 1.0
 # Mesozoic water life: plesiosaurs, ichthyosaur schools, drifting
@@ -35,26 +55,40 @@ var _life_time: float = 0.0
 var _life_tick: int = 0
 const MAX_LIFE_NODES := 170
 
+# --- Streaming -------------------------------------------------------------
+# Chunk meshes are built by ChunkBuild objects off the main thread (or stepped
+# under a time budget when threading is off), then assembled on the main
+# thread as they land. The main thread never builds a whole chunk at once, so
+# crossing a chunk boundary no longer stalls the frame.
+const MAX_IN_FLIGHT := 8
+const ASSEMBLE_BUDGET_USEC := 6000
+var _queue: Array[Vector2i] = []
+var _queued: Dictionary = {}
+var _pending: Dictionary = {}
+var _task_ids: Dictionary = {}
+var _results: Array = []
+var _results_mutex := Mutex.new()
+var _slice_current = null
+var _threads_enabled := true
+var _terrain_materials: Array[StandardMaterial3D] = []
+
 
 func _process(_delta: float) -> void:
+	_pump_streaming()
 	# Magma glow flicker for active volcanoes; eruption state machine.
 	_dive_alpha = lerpf(_dive_alpha, _dive_target, 1.0 - exp(-_delta * 3.0))
-	for i in range(_water_mats.size() - 1, -1, -1):
-		var mat: StandardMaterial3D = _water_mats[i]
-		if not is_instance_valid(mat):
-			_water_mats.remove_at(i)
-			continue
-		var c: Color = mat.albedo_color
+	if _water_material != null and absf(_dive_alpha - _water_applied_alpha) > 0.002:
+		var c: Color = _water_material.albedo_color
 		c.a = _dive_alpha
-		mat.albedo_color = c
+		_water_material.albedo_color = c
+		_water_applied_alpha = _dive_alpha
 	_update_life(_delta)
+	_prune_dead_volcanoes()
 	if _volcanoes.is_empty():
 		return
 	_volc_time += _delta
 	for v in _volcanoes:
 		var glow: OmniLight3D = v.get("glow")
-		if not is_instance_valid(glow):
-			continue
 		var p: float = v.get("phase", 0.0)
 		var flicker: float = sin(_volc_time * 7.0 + p) * 0.5 + sin(_volc_time * 13.0 + p * 2.0) * 0.3
 		var erupting: float = float(v.get("erupting", 0.0))
@@ -79,6 +113,15 @@ func _process(_delta: float) -> void:
 				(flow as Node3D).visible = erupting > 0.0
 
 
+func _prune_dead_volcanoes() -> void:
+	# Volcano records outlive the chunk that made their nodes for one frame
+	# (queue_free is deferred), and update_follow now early-outs on the frame
+	# the dragon stays in a cell, so clean up every frame here instead.
+	for i in range(_volcanoes.size() - 1, -1, -1):
+		if not is_instance_valid(_volcanoes[i].get("glow")):
+			_volcanoes.remove_at(i)
+
+
 func nearest_volcano(dragon_pos: Vector3, max_dist: float) -> int:
 	var best := -1
 	var best_d := max_dist
@@ -94,7 +137,7 @@ func nearest_volcano(dragon_pos: Vector3, max_dist: float) -> int:
 func volcano_proximity(dragon_pos: Vector3) -> float:
 	var closest := 1e20
 	for v in _volcanoes:
-		var glow: Object = v.get("glow")
+		var glow = v.get("glow")
 		if glow == null or not is_instance_valid(glow):
 			continue
 		var anchor: Vector3 = v.get("anchor", Vector3.ZERO)
@@ -121,7 +164,14 @@ func _ready() -> void:
 	randomize()
 	world_seed = randi_range(1, 2000000000)
 	_configure_noise()
+	# AERIE_SYNC_STREAM forces the single-threaded sliced path (useful for
+	# debugging or platforms where worker threads are unavailable).
+	_threads_enabled = not OS.has_environment("AERIE_SYNC_STREAM")
 	update_follow(Vector3.ZERO)
+	# Put ground under the dragon immediately; the rest streams in behind it.
+	var center := _cell_at(0.0, 0.0)
+	if not chunks.has(center):
+		_build_now(center)
 
 
 func _configure_noise() -> void:
@@ -153,36 +203,252 @@ func _configure_noise() -> void:
 
 func update_follow(dragon_pos: Vector3) -> void:
 	# Open world: symmetric radius in every direction so U-turns and free
-	# flight always have terrain.
+	# flight always have terrain. Only the bookkeeping runs here; the actual
+	# mesh build is queued and drained by _pump_streaming in _process.
 	var center := _cell_at(dragon_pos.x, dragon_pos.z)
+	if center == _last_follow_center:
+		return
+	_last_follow_center = center
 	for row in range(center.y - ROW_RADIUS, center.y + ROW_RADIUS + 1):
 		for col in range(center.x - COL_RADIUS, center.x + COL_RADIUS + 1):
 			var key := Vector2i(col, row)
-			if not chunks.has(key):
-				_spawn_chunk(row, col)
+			if chunks.has(key) or _queued.has(key) or _pending.has(key):
+				continue
+			_queue.append(key)
+			_queued[key] = true
 	for key in chunks.keys():
 		if absi(key.y - center.y) > ROW_RADIUS or absi(key.x - center.x) > COL_RADIUS:
 			var old_chunk: Node3D = chunks[key]
 			chunks.erase(key)
 			old_chunk.queue_free()
-	# Drop volcano records whose chunk was recycled.
-	for i in range(_volcanoes.size() - 1, -1, -1):
-		if not is_instance_valid(_volcanoes[i].get("glow")):
-			_volcanoes.remove_at(i)
 
 
 func regenerate_at(dragon_pos: Vector3) -> void:
+	# Let in-flight builders finish before the caches/noise are replaced: a
+	# worker still sampling would otherwise race the main thread's clears.
+	_cancel_streaming()
 	for old_chunk in chunks.values():
 		old_chunk.queue_free()
 	chunks.clear()
 	_biome_cache.clear()
 	_water_cache.clear()
-	_water_mats.clear()
 	_life.clear()
 	_volcanoes.clear()
 	world_seed = randi_range(1, 2000000000)
 	_configure_noise()
+	_last_follow_center = Vector2i(-9999999, -9999999)
 	update_follow(dragon_pos)
+	var center := _cell_at(dragon_pos.x, dragon_pos.z)
+	if not chunks.has(center):
+		_build_now(center)
+
+
+# --- Streaming machinery ---------------------------------------------------
+
+func _pump_streaming() -> void:
+	_results_mutex.lock()
+	var ready: Array = _results
+	_results = []
+	_results_mutex.unlock()
+	if not ready.is_empty():
+		# Assemble under a time budget so a burst of finished chunks does not
+		# become a burst of ArrayMesh uploads in one frame.
+		var deadline: int = Time.get_ticks_usec() + ASSEMBLE_BUDGET_USEC
+		var leftover: Array = []
+		for b in ready:
+			if Time.get_ticks_usec() > deadline:
+				leftover.append(b)
+				continue
+			_reap_task(b.cell)
+			_pending.erase(b.cell)
+			if _in_radius(b.cell):
+				_assemble_chunk(b)
+		if not leftover.is_empty():
+			_results_mutex.lock()
+			_results.append_array(leftover)
+			_results_mutex.unlock()
+	if _threads_enabled:
+		_dispatch_all()
+	else:
+		_pump_sliced()
+
+
+func _dispatch_all() -> void:
+	while _pending.size() < MAX_IN_FLIGHT and not _queue.is_empty():
+		var cell: Vector2i = _queue.pop_front()
+		_queued.erase(cell)
+		if chunks.has(cell) or _pending.has(cell) or not _in_radius(cell):
+			continue
+		_warm_cell(cell)
+		var b = _make_build(cell.y, cell.x)
+		_pending[cell] = true
+		_task_ids[cell] = WorkerThreadPool.add_task(_worker_run.bind(b), true, "aerie_chunk")
+
+
+func _worker_run(b) -> void:
+	b.run_all()
+	_results_mutex.lock()
+	_results.append(b)
+	_results_mutex.unlock()
+
+
+func _reap_task(cell: Vector2i) -> void:
+	# A WorkerThreadPool task that is never waited on keeps the pool from
+	# shutting down (the process hangs on quit). Reclaim finished tasks as
+	# their results are drained.
+	if _task_ids.has(cell):
+		WorkerThreadPool.wait_for_task_completion(_task_ids[cell])
+		_task_ids.erase(cell)
+
+
+func _exit_tree() -> void:
+	# Reap anything still in flight so the pool can shut down cleanly.
+	for cell in _task_ids.keys():
+		WorkerThreadPool.wait_for_task_completion(_task_ids[cell])
+	_task_ids.clear()
+
+
+func _pump_sliced() -> void:
+	var deadline: int = Time.get_ticks_usec() + ASSEMBLE_BUDGET_USEC
+	while Time.get_ticks_usec() < deadline:
+		if _slice_current == null:
+			var started := false
+			while not _queue.is_empty():
+				var cell: Vector2i = _queue.pop_front()
+				_queued.erase(cell)
+				if chunks.has(cell) or _pending.has(cell) or not _in_radius(cell):
+					continue
+				_warm_cell(cell)
+				_slice_current = _make_build(cell.y, cell.x)
+				started = true
+				break
+			if not started:
+				return
+		if _slice_current.step(deadline - Time.get_ticks_usec()):
+			_assemble_chunk(_slice_current)
+			_slice_current = null
+
+
+func _cancel_streaming() -> void:
+	for cell in _task_ids:
+		WorkerThreadPool.wait_for_task_completion(_task_ids[cell])
+	_task_ids.clear()
+	_pending.clear()
+	_queued.clear()
+	_queue.clear()
+	_slice_current = null
+	_results_mutex.lock()
+	_results.clear()
+	_results_mutex.unlock()
+
+
+func _build_now(cell: Vector2i) -> void:
+	# Synchronous single-chunk build, used for the ground under the dragon at
+	# startup and after a reseed so there is never a hole at the focus point.
+	_queued.erase(cell)
+	_warm_cell(cell)
+	var b = _make_build(cell.y, cell.x)
+	b.run_all()
+	_assemble_chunk(b)
+
+
+func _make_build(row: int, col: int):
+	var cell := Vector2i(col, row)
+	var biome_index: int = _biome_index(cell)
+	var chunk_name := "Biome_r%02d_c%02d_%s" % [row, col, BIOMES[biome_index].replace(" ", "_")]
+	var b = ChunkBuild.new()
+	b.setup(self, row, col, biome_index, chunk_name, GRID_X, GRID_Z, CHUNK_LENGTH, WORLD_WIDTH, WATER_LEVEL)
+	return b
+
+
+func _in_radius(cell: Vector2i) -> bool:
+	return absi(cell.y - _last_follow_center.y) <= ROW_RADIUS and absi(cell.x - _last_follow_center.x) <= COL_RADIUS
+
+
+func _warm_cell(cell: Vector2i) -> void:
+	# Pre-populate the main-thread biome/water caches for the cell and its 8
+	# neighbors so chunk assembly and collision sampling hit the cache. Worker
+	# builders keep private caches and never touch these.
+	for dz in [-1, 0, 1]:
+		for dx in [-1, 0, 1]:
+			var c := cell + Vector2i(dx, dz)
+			_biome_index(c)
+			_water_class(c)
+
+
+func _assemble_chunk(b) -> void:
+	var cell: Vector2i = b.cell
+	if chunks.has(cell):
+		return
+	var chunk := Node3D.new()
+	chunk.name = b.chunk_name
+	chunk.position = Vector3(float(b.col) * WORLD_WIDTH, 0.0, -float(b.row) * CHUNK_LENGTH)
+	add_child(chunk)
+	chunks[cell] = chunk
+	var biome_index: int = b.biome_index
+	for s in b.surfaces:
+		var arrays: Array = s.get("arrays", [])
+		if arrays.is_empty():
+			continue
+		var mesh := ArrayMesh.new()
+		mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrays)
+		var mi := MeshInstance3D.new()
+		if str(s.get("kind", "")) == "terrain":
+			mi.name = "Faceted_terrain"
+			mesh.surface_set_material(0, _terrain_material(biome_index))
+		else:
+			mi.name = "Still_water"
+			mesh.surface_set_material(0, _water_material_for())
+		mi.mesh = mesh
+		chunk.add_child(mi)
+	if biome_index == B_FOREST:
+		_add_forest(chunk, b.row, b.col)
+	elif biome_index == B_DESERT:
+		_add_cacti(chunk, b.row, b.col)
+	elif biome_index == B_GLACIER:
+		_add_ice_spires(chunk, b.row, b.col)
+	elif biome_index == B_VOLCANO:
+		_add_volcano(chunk, b.row, b.col)
+	# One opaque plane per chunk: terrain above the waterline hides it, so
+	# seas, merged lakes, rivers, and desert oases all read correctly.
+	_add_aquatic_life(chunk, b.row, b.col)
+
+
+func _terrain_material(biome_index: int) -> StandardMaterial3D:
+	if _terrain_materials.size() != BIOMES.size():
+		_terrain_materials.resize(BIOMES.size())
+	var material: StandardMaterial3D = _terrain_materials[biome_index]
+	if material == null:
+		material = StandardMaterial3D.new()
+		material.vertex_color_use_as_albedo = true
+		# Ice reflects more sun; rock/grass stays matte but not fully flat.
+		if biome_index == B_GLACIER:
+			material.roughness = 0.38
+			material.metallic = 0.05
+		else:
+			material.roughness = 0.85
+		# Terrain is a heightfield with no overhangs and collision keeps the
+		# camera above it, so the underside is never seen. The builder winds
+		# triangles so the generated normals face up (matching Godot's
+		# front-face convention), so backface culling is safe and halves the
+		# raster work the old CULL_DISABLED paid for.
+		material.cull_mode = BaseMaterial3D.CULL_BACK
+		_terrain_materials[biome_index] = material
+	return material
+
+
+func _water_material_for() -> StandardMaterial3D:
+	# One shared water material for every chunk: sets up the dive fade once
+	# instead of per chunk, and _process updates a single instance.
+	if _water_material == null:
+		_water_material = StandardMaterial3D.new()
+		_water_material.vertex_color_use_as_albedo = true
+		_water_material.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+		_water_material.roughness = 0.3
+		_water_material.metallic = 0.0
+		# Unculled: visible from above, and from below while diving.
+		_water_material.cull_mode = BaseMaterial3D.CULL_DISABLED
+	return _water_material
 
 
 func biome_name_at(dragon_pos: Vector3) -> String:
@@ -214,12 +480,14 @@ func water_at(x_abs: float, world_z: float) -> bool:
 
 
 func _is_water_biome(biome_index: int) -> bool:
-	return BIOMES[biome_index] == "Lake country" or BIOMES[biome_index] == "Steppe" or BIOMES[biome_index] == "Forest"
+	return biome_index == B_LAKE or biome_index == B_STEPPE or biome_index == B_FOREST
 
 
-func _water_class(cell: Vector2i) -> int:
-	if _water_cache.has(cell):
-		return _water_cache[cell]
+func _water_class(cell: Vector2i, cache = null) -> int:
+	if cache == null:
+		cache = _water_cache
+	if cache.has(cell):
+		return cache[cell]
 	var wet := {}
 	var count := 0
 	for dz in [-1, 0, 1]:
@@ -240,7 +508,7 @@ func _water_class(cell: Vector2i) -> int:
 	elif count >= 5:
 		# Dry cell ringed by water joins the lake.
 		result = WC_LAKE
-	_water_cache[cell] = result
+	cache[cell] = result
 	return result
 
 
@@ -363,14 +631,20 @@ func _cell_at(x_abs: float, world_z: float) -> Vector2i:
 
 
 func _raw_biome(cell: Vector2i) -> int:
-	var rng := RandomNumberGenerator.new()
-	rng.seed = absi(world_seed + cell.x * 73856093 + cell.y * 19349663) + 7
-	return rng.randi_range(0, BIOMES.size() - 1)
+	# Integer hash instead of a fresh RandomNumberGenerator: this runs dozens
+	# of times per chunk (9 neighbors per water class), and allocating an RNG
+	# dominated the call. Deterministic and in-range, distribution unchanged.
+	var h: int = world_seed + cell.x * 73856093 + cell.y * 19349663 + 7
+	h = (h ^ (h >> 13)) * 1274126177
+	h = h ^ (h >> 16)
+	return absi(h) % BIOMES.size()
 
 
-func _biome_index(cell: Vector2i) -> int:
-	if _biome_cache.has(cell):
-		return _biome_cache[cell]
+func _biome_index(cell: Vector2i, cache = null) -> int:
+	if cache == null:
+		cache = _biome_cache
+	if cache.has(cell):
+		return cache[cell]
 	var result: int = _raw_biome(cell)
 	# Deterministic de-dup against fixed neighbors (order-independent).
 	var left: int = _raw_biome(cell + Vector2i(-1, 0))
@@ -379,32 +653,8 @@ func _biome_index(cell: Vector2i) -> int:
 		result = (result + 1) % BIOMES.size()
 		if result == left or result == back:
 			result = (result + 1) % BIOMES.size()
-	_biome_cache[cell] = result
+	cache[cell] = result
 	return result
-
-
-func _spawn_chunk(row: int, col: int) -> void:
-	var cell := Vector2i(col, row)
-	var chunk := Node3D.new()
-	chunk.name = "Biome_r%02d_c%02d_%s" % [row, col, BIOMES[_biome_index(cell)].replace(" ", "_")]
-	chunk.position = Vector3(float(col) * WORLD_WIDTH, 0.0, -float(row) * CHUNK_LENGTH)
-	add_child(chunk)
-	chunks[Vector2i(col, row)] = chunk
-	var biome_index: int = _biome_index(cell)
-	var biome: String = BIOMES[biome_index]
-	_add_terrain(chunk, row, col, biome_index)
-	if biome == "Forest":
-		_add_forest(chunk, row, col)
-	elif biome == "Desert":
-		_add_cacti(chunk, row, col)
-	elif biome == "Glacier":
-		_add_ice_spires(chunk, row, col)
-	elif biome == "Volcano":
-		_add_volcano(chunk, row, col)
-	# One opaque plane per chunk: terrain above the waterline hides it, so
-	# seas, merged lakes, rivers, and desert oases all read correctly.
-	_add_water(chunk, row, col)
-	_add_aquatic_life(chunk, row, col)
 
 
 func _height_for_biome(x: float, world_z: float, biome_index: int, wc: int) -> float:
@@ -412,20 +662,20 @@ func _height_for_biome(x: float, world_z: float, biome_index: int, wc: int) -> f
 	var detail: float = detail_noise.get_noise_2d(x, world_z)
 	var ridge: float = 1.0 - abs(ridge_noise.get_noise_2d(x, world_z))
 	var h: float
-	match BIOMES[biome_index]:
-		"Mountains":
+	match biome_index:
+		B_MOUNTAINS:
 			h = 22.0 + pow(ridge, 1.45) * 36.0 + broad * 7.0 + detail * 4.0
-		"Glacier":
+		B_GLACIER:
 			h = 28.0 + pow(ridge, 1.7) * 30.0 + broad * 7.0 + detail * 2.0
-		"Volcano":
+		B_VOLCANO:
 			h = 20.0 + broad * 11.0 + detail * 6.0 + ridge * 9.0
-		"Forest":
+		B_FOREST:
 			h = 21.0 + broad * 14.0 + detail * 3.0 - _basin(broad, -0.25, 10.0)
-		"Desert":
+		B_DESERT:
 			h = 15.0 + abs(broad) * 8.5 + detail * 3.0 + sin(world_z * 0.024 + x * 0.012) * 3.5
-		"Lake country":
+		B_LAKE:
 			h = 17.0 + broad * 5.0 + detail * 1.3 - _basin(broad, -0.1, 14.0)
-		"Highlands":
+		B_HIGHLANDS:
 			h = 24.0 + abs(broad) * 18.0 + ridge * 8.0 + detail * 4.0
 		_:
 			h = 19.0 + broad * 8.0 + detail * 2.5 + sin(x * 0.018) * 2.0 - _basin(broad, -0.2, 8.0)
@@ -451,60 +701,63 @@ func _basin(broad: float, edge: float, depth: float) -> float:
 	return (1.0 - smoothstep(edge - 0.6, edge, broad)) * depth
 
 
-func _height_open(x_abs: float, world_z: float) -> float:
+func _height_open(x_abs: float, world_z: float, bcache = null, wcache = null) -> float:
 	# Open-world height: cell biome blended toward edge neighbors on both
 	# axes. Midpoint (0.5/0.5) exactly on shared edges, so neighbor chunks
 	# compute identical values and seams match.
+	# bcache/wcache let a worker thread use private biome/water caches instead
+	# of the shared ones (a Godot Dictionary is not safe for concurrent
+	# read+write). Main-thread callers leave them null.
 	var cell := _cell_at(x_abs, world_z)
-	var h: float = _height_for_biome(x_abs, world_z, _biome_index(cell), _water_class(cell))
+	var h: float = _height_for_biome(x_abs, world_z, _biome_index(cell, bcache), _water_class(cell, wcache))
 	var origin_x: float = float(cell.x) * WORLD_WIDTH - WORLD_WIDTH * 0.5
 	var u: float = (x_abs - origin_x) / WORLD_WIDTH
 	if u < EDGE_BLEND:
 		var n := Vector2i(cell.x - 1, cell.y)
 		var w: float = 0.5 * (1.0 - smoothstep(0.0, EDGE_BLEND, u))
-		h = lerpf(_height_for_biome(x_abs, world_z, _biome_index(n), _water_class(n)), h, 1.0 - w)
+		h = lerpf(_height_for_biome(x_abs, world_z, _biome_index(n, bcache), _water_class(n, wcache)), h, 1.0 - w)
 	elif u > 1.0 - EDGE_BLEND:
 		var n2 := Vector2i(cell.x + 1, cell.y)
 		var w2: float = 0.5 * (1.0 - smoothstep(0.0, EDGE_BLEND, 1.0 - u))
-		h = lerpf(_height_for_biome(x_abs, world_z, _biome_index(n2), _water_class(n2)), h, 1.0 - w2)
+		h = lerpf(_height_for_biome(x_abs, world_z, _biome_index(n2, bcache), _water_class(n2, wcache)), h, 1.0 - w2)
 	var origin_z: float = -float(cell.y + 1) * CHUNK_LENGTH
 	var t: float = (world_z - origin_z) / CHUNK_LENGTH
 	if t < EDGE_BLEND:
 		var n3 := Vector2i(cell.x, cell.y + 1)
 		var w3: float = 0.5 * (1.0 - smoothstep(0.0, EDGE_BLEND, t))
-		h = lerpf(_height_for_biome(x_abs, world_z, _biome_index(n3), _water_class(n3)), h, 1.0 - w3)
+		h = lerpf(_height_for_biome(x_abs, world_z, _biome_index(n3, bcache), _water_class(n3, wcache)), h, 1.0 - w3)
 	elif t > 1.0 - EDGE_BLEND:
 		var n4 := Vector2i(cell.x, cell.y - 1)
 		var w4: float = 0.5 * (1.0 - smoothstep(0.0, EDGE_BLEND, 1.0 - t))
-		h = lerpf(_height_for_biome(x_abs, world_z, _biome_index(n4), _water_class(n4)), h, 1.0 - w4)
+		h = lerpf(_height_for_biome(x_abs, world_z, _biome_index(n4, bcache), _water_class(n4, wcache)), h, 1.0 - w4)
 	return snappedf(h, 1.0)
 
 
-func _color_open(x_abs: float, world_z: float, height: float, detail: float) -> Color:
+func _color_open(x_abs: float, world_z: float, height: float, detail: float, bcache = null, wcache = null) -> Color:
 	# Same edge weights as _height_open, applied to colors so tint borders
-	# stay continuous too.
+	# stay continuous too. bcache/wcache as in _height_open.
 	var cell := _cell_at(x_abs, world_z)
-	var c: Color = _ground_color(_biome_index(cell), height, detail, _water_class(cell))
+	var c: Color = _ground_color(_biome_index(cell, bcache), height, detail, _water_class(cell, wcache))
 	var origin_x: float = float(cell.x) * WORLD_WIDTH - WORLD_WIDTH * 0.5
 	var u: float = (x_abs - origin_x) / WORLD_WIDTH
 	if u < EDGE_BLEND:
 		var n := Vector2i(cell.x - 1, cell.y)
 		var w: float = 0.5 * (1.0 - smoothstep(0.0, EDGE_BLEND, u))
-		c = _ground_color(_biome_index(n), height, detail, _water_class(n)).lerp(c, 1.0 - w)
+		c = _ground_color(_biome_index(n, bcache), height, detail, _water_class(n, wcache)).lerp(c, 1.0 - w)
 	elif u > 1.0 - EDGE_BLEND:
 		var n2 := Vector2i(cell.x + 1, cell.y)
 		var w2: float = 0.5 * (1.0 - smoothstep(0.0, EDGE_BLEND, 1.0 - u))
-		c = _ground_color(_biome_index(n2), height, detail, _water_class(n2)).lerp(c, 1.0 - w2)
+		c = _ground_color(_biome_index(n2, bcache), height, detail, _water_class(n2, wcache)).lerp(c, 1.0 - w2)
 	var origin_z: float = -float(cell.y + 1) * CHUNK_LENGTH
 	var t: float = (world_z - origin_z) / CHUNK_LENGTH
 	if t < EDGE_BLEND:
 		var n3 := Vector2i(cell.x, cell.y + 1)
 		var w3: float = 0.5 * (1.0 - smoothstep(0.0, EDGE_BLEND, t))
-		c = _ground_color(_biome_index(n3), height, detail, _water_class(n3)).lerp(c, 1.0 - w3)
+		c = _ground_color(_biome_index(n3, bcache), height, detail, _water_class(n3, wcache)).lerp(c, 1.0 - w3)
 	elif t > 1.0 - EDGE_BLEND:
 		var n4 := Vector2i(cell.x, cell.y - 1)
 		var w4: float = 0.5 * (1.0 - smoothstep(0.0, EDGE_BLEND, 1.0 - t))
-		c = _ground_color(_biome_index(n4), height, detail, _water_class(n4)).lerp(c, 1.0 - w4)
+		c = _ground_color(_biome_index(n4, bcache), height, detail, _water_class(n4, wcache)).lerp(c, 1.0 - w4)
 	return c
 
 
@@ -512,27 +765,27 @@ func _ground_color(biome_index: int, height: float, detail: float, wc: int) -> C
 	var low: Color
 	var high: Color
 	var snow_line: float = 1000.0
-	match BIOMES[biome_index]:
-		"Mountains":
+	match biome_index:
+		B_MOUNTAINS:
 			low = Color("4f8a35")
 			snow_line = 50.0
 			high = Color("f4f6f3") if height > snow_line else Color("7d9078")
-		"Glacier":
+		B_GLACIER:
 			low = Color("bcdcec")
 			high = Color("ffffff") if height > 40.0 else Color("aed6e8")
-		"Volcano":
+		B_VOLCANO:
 			low = Color("4a3428")
 			high = Color("8a5f3d")
-		"Forest":
+		B_FOREST:
 			low = Color("1f6b2e")
 			high = Color("46b34a")
-		"Desert":
+		B_DESERT:
 			low = Color("c98f3d")
 			high = Color("e8b04b")
-		"Lake country":
+		B_LAKE:
 			low = Color("2f8a3d")
 			high = Color("6fbf5a")
-		"Highlands":
+		B_HIGHLANDS:
 			low = Color("4f8a2f")
 			high = Color("e8ece6") if height > 52.0 else Color("84ac54")
 		_:
@@ -549,58 +802,12 @@ func _ground_color(biome_index: int, height: float, detail: float, wc: int) -> C
 	return color
 
 
-func _add_terrain(parent: Node3D, row: int, col: int, biome_index: int) -> void:
-	var surface := SurfaceTool.new()
-	surface.begin(Mesh.PRIMITIVE_TRIANGLES)
-	var material := StandardMaterial3D.new()
-	material.vertex_color_use_as_albedo = true
-	# Ice reflects more sun; rock/grass stays matte but not fully flat.
-	if BIOMES[biome_index] == "Glacier":
-		material.roughness = 0.38
-		material.metallic = 0.05
-	else:
-		material.roughness = 0.85
-	material.cull_mode = BaseMaterial3D.CULL_DISABLED
-	surface.set_material(material)
-	var width: float = WORLD_WIDTH
-	for iz in range(GRID_Z):
-		for ix in range(GRID_X):
-			var x0: float = -width * 0.5 + width * float(ix) / GRID_X
-			var x1: float = -width * 0.5 + width * float(ix + 1) / GRID_X
-			var z0: float = -CHUNK_LENGTH * float(iz) / GRID_Z
-			var z1: float = -CHUNK_LENGTH * float(iz + 1) / GRID_Z
-			var base_z: float = -float(row) * CHUNK_LENGTH
-			var base_x: float = float(col) * WORLD_WIDTH
-			var p00 := Vector3(x0, _height_open(base_x + x0, base_z + z0), z0)
-			var p10 := Vector3(x1, _height_open(base_x + x1, base_z + z0), z0)
-			var p11 := Vector3(x1, _height_open(base_x + x1, base_z + z1), z1)
-			var p01 := Vector3(x0, _height_open(base_x + x0, base_z + z1), z1)
-			_add_colored_triangle(surface, p00, p10, p11, row, col)
-			_add_colored_triangle(surface, p00, p11, p01, row, col)
-	surface.generate_normals()
-	var mesh_instance := MeshInstance3D.new()
-	mesh_instance.name = "Faceted_terrain"
-	mesh_instance.mesh = surface.commit()
-	parent.add_child(mesh_instance)
-
-
-func _add_colored_triangle(surface: SurfaceTool, a: Vector3, b: Vector3, c: Vector3, row: int, col: int) -> void:
-	var base_x: float = float(col) * WORLD_WIDTH
-	var base_z: float = -float(row) * CHUNK_LENGTH
-	for point in [a, b, c]:
-		var x_abs: float = base_x + point.x
-		var world_z: float = base_z + point.z
-		var detail: float = detail_noise.get_noise_2d(x_abs, world_z)
-		surface.set_color(_color_open(x_abs, world_z, point.y, detail))
-		surface.add_vertex(point)
-
-
-func _water_color_at(x_abs: float, world_z: float) -> Color:
+func _water_color_at(x_abs: float, world_z: float, bcache = null, wcache = null) -> Color:
 	# Depth-graded surface: pale shelf water sinking through teal and blue
 	# toward abyssal navy, teal rivers. Sampled per-vertex from the same
 	# height field, so shared chunk edges compute identical values and no
 	# tint seam appears.
-	var depth: float = WATER_LEVEL - _height_open(x_abs, world_z)
+	var depth: float = WATER_LEVEL - _height_open(x_abs, world_z, bcache, wcache)
 	var c: Color = _depth_ramp(depth)
 	var rw: float = _river_weight(x_abs, world_z)
 	if rw > 0.3:
@@ -627,48 +834,6 @@ func _depth_ramp(depth: float) -> Color:
 	if depth < 14.0:
 		return deep.lerp(abyss, (depth - 10.0) / 4.0)
 	return abyss
-
-
-func _add_water(parent: Node3D, row: int, col: int) -> void:
-	var water := MeshInstance3D.new()
-	water.name = "Still_water"
-	var surface := SurfaceTool.new()
-	surface.begin(Mesh.PRIMITIVE_TRIANGLES)
-	var water_material := StandardMaterial3D.new()
-	# Opaque-look surface that can fade while diving so the swimmer stays
-	# visible: transparency on, alpha driven toward 1.0 / 0.45 in _process.
-	water_material.vertex_color_use_as_albedo = true
-	water_material.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
-	water_material.roughness = 0.3
-	water_material.metallic = 0.0
-	# Unculled: visible from above, and from below while diving.
-	water_material.cull_mode = BaseMaterial3D.CULL_DISABLED
-	surface.set_material(water_material)
-	# Full chunk span with coincident edge verts: no coverage gap, no seam.
-	# Dense enough (36x16) that depth tinting resolves basins, channels,
-	# and shorelines instead of blurring across them.
-	var gx := 36
-	var gz := 16
-	var base_x: float = float(col) * WORLD_WIDTH
-	var base_z: float = -float(row) * CHUNK_LENGTH
-	for j in range(gz):
-		for i in range(gx):
-			var x0: float = -WORLD_WIDTH * 0.5 + WORLD_WIDTH * float(i) / gx
-			var x1: float = -WORLD_WIDTH * 0.5 + WORLD_WIDTH * float(i + 1) / gx
-			var z0: float = -CHUNK_LENGTH * float(j) / gz
-			var z1: float = -CHUNK_LENGTH * float(j + 1) / gz
-			var quad := [Vector3(x0, WATER_LEVEL, z0), Vector3(x1, WATER_LEVEL, z0), Vector3(x1, WATER_LEVEL, z1), Vector3(x0, WATER_LEVEL, z1)]
-			for v in [quad[0], quad[1], quad[2]]:
-				surface.set_color(_water_color_at(base_x + v.x, base_z + v.z))
-				surface.add_vertex(v)
-			for v in [quad[0], quad[2], quad[3]]:
-				surface.set_color(_water_color_at(base_x + v.x, base_z + v.z))
-				surface.add_vertex(v)
-	surface.generate_normals()
-	water.mesh = surface.commit()
-	water.position = Vector3.ZERO
-	parent.add_child(water)
-	_water_mats.append(water_material)
 
 
 func set_dive(diving: bool) -> void:
